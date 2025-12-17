@@ -6,10 +6,14 @@ import pickle
 from ultralytics import YOLO
 import supervision as sv
 from utils import get_center_of_bbox, get_bbox_width
+from .ball_physics import BallPhysicsTracker
+
 class Tracker:
-    def __init__(self, model_path):
+    def __init__(self, model_path, fps=30.0):
         self.model = YOLO(model_path)
         self.tracker = sv.ByteTrack()
+        self.fps = fps
+        self.ball_physics = BallPhysicsTracker(fps=fps)
     def detect_frames(self, frames):
         batch_size = 20
         detections = []
@@ -42,7 +46,45 @@ class Tracker:
                 if cls_names[class_id] == "goalkeeper":
                     detection_supervision.class_id[object_ind] = cls_names_inv["player"]
 
-            #Track Objects
+            # Check if ball is detected in this frame
+            ball_detected = False
+            ball_bbox = None
+            for i, cls_id in enumerate(detection_supervision.class_id):
+                if cls_id == cls_names_inv['ball']:
+                    ball_detected = True
+                    # Update physics tracker with detected ball
+                    ball_bbox = detection_supervision.xyxy[i].tolist()
+                    self.ball_physics.update(ball_bbox, frame_num)
+                    break
+
+            # If ball NOT detected, use physics prediction to help ByteTrack re-acquire
+            if not ball_detected and self.ball_physics.is_tracking():
+                predicted_pos = self.ball_physics.predict(frame_num)
+                
+                if predicted_pos is not None:
+                    # Create synthetic detection box at predicted position
+                    x, y = predicted_pos
+                    bbox_size = 20  # Approximate ball size
+                    predicted_bbox = np.array([
+                        [x - bbox_size, y - bbox_size, x + bbox_size, y + bbox_size]
+                    ], dtype=np.float32)
+                    
+                    # Get ball class ID
+                    ball_class_id = cls_names_inv['ball']
+                    
+                    # Add predicted ball to detections so ByteTrack can re-acquire
+                    if len(detection_supervision.xyxy) == 0:
+                        # If no detections, create new detection arrays
+                        detection_supervision.xyxy = predicted_bbox
+                        detection_supervision.confidence = np.array([0.5], dtype=np.float32)  # Medium confidence for prediction
+                        detection_supervision.class_id = np.array([ball_class_id], dtype=np.int64)
+                    else:
+                        # Append to existing detections
+                        detection_supervision.xyxy = np.vstack([detection_supervision.xyxy, predicted_bbox])
+                        detection_supervision.confidence = np.append(detection_supervision.confidence, np.array([0.5], dtype=np.float32))
+                        detection_supervision.class_id = np.append(detection_supervision.class_id, np.array([ball_class_id], dtype=np.int64))
+
+            #Track Objects (now includes predicted ball if ball was missing)
             detection_with_tracks = self.tracker.update_with_detections(detection_supervision)
 
             tracks["players"].append({})
@@ -59,17 +101,81 @@ class Tracker:
                 if cls_id == cls_names_inv['referee']:
                     tracks["referees"][frame_num][track_id] = {"bbox":bbox}
 
-            for frame_detection in detection_supervision:
+            # Extract ball from tracked detections (includes both real and predicted)
+            ball_tracked = False
+            for frame_detection in detection_with_tracks:
                 bbox = frame_detection[0].tolist()
                 cls_id = frame_detection[3]
+                track_id = frame_detection[4]
 
                 if cls_id == cls_names_inv['ball']:
-                    tracks["ball"][frame_num][1] = {"bbox":bbox}
+                    # Check if this was a predicted position (not originally detected)
+                    is_predicted = not ball_detected
+                    tracks["ball"][frame_num][track_id] = {
+                        "bbox": bbox,
+                        "predicted": is_predicted
+                    }
+                    ball_tracked = True
+                    
+                    # If it was predicted and ByteTrack accepted it, update physics with tracked position
+                    if is_predicted:
+                        self.ball_physics.update(bbox, frame_num)
+            
+            # If ball was detected but not tracked (shouldn't happen, but handle it)
+            if ball_detected and not ball_tracked and ball_bbox is not None:
+                tracks["ball"][frame_num][1] = {
+                    "bbox": ball_bbox,
+                    "predicted": False
+                }
 
         if stub_path is not None:
             with open(stub_path,'wb') as f:
                 pickle.dump(tracks,f)
 
+        return tracks
+    
+    def _apply_physics_prediction(self, tracks, total_frames):
+        """
+        Fill gaps in ball tracking using physics-based trajectory prediction
+        """
+        # Reset physics tracker
+        self.ball_physics.reset()
+        
+        # First pass: build physics model from detected balls
+        for frame_num in range(total_frames):
+            ball_dict = tracks["ball"][frame_num]
+            if len(ball_dict) > 0:
+                # Ball detected - update physics tracker
+                for track_id, ball in ball_dict.items():
+                    bbox = ball["bbox"]
+                    self.ball_physics.update(bbox, frame_num)
+        
+        # Second pass: fill gaps with physics predictions
+        for frame_num in range(total_frames):
+            ball_dict = tracks["ball"][frame_num]
+            
+            if len(ball_dict) == 0:
+                # Ball not detected - try to predict
+                predicted_pos = self.ball_physics.predict(frame_num)
+                
+                if predicted_pos is not None:
+                    # Create bbox around predicted position
+                    x, y = predicted_pos
+                    bbox_size = 20  # Approximate ball size in pixels
+                    bbox = [
+                        x - bbox_size,  # x1
+                        y - bbox_size,  # y1
+                        x + bbox_size,  # x2
+                        y + bbox_size   # y2
+                    ]
+                    # Add predicted ball position
+                    tracks["ball"][frame_num][1] = {"bbox": bbox, "predicted": True}
+            else:
+                # Ball detected - update physics tracker for next prediction
+                for track_id, ball in ball_dict.items():
+                    bbox = ball["bbox"]
+                    self.ball_physics.update(bbox, frame_num)
+        
         return tracks
 
     def draw_ellipse(self, frame, bbox, color, track_id=None):
@@ -152,7 +258,13 @@ class Tracker:
 
             # Draw ball
             for track_id, ball in ball_dict.items():
-                frame = self.draw_traingle(frame, ball["bbox"], (0, 255, 0))
+                # Use different color for predicted positions
+                if ball.get("predicted", False):
+                    # Orange/yellow for predicted positions
+                    frame = self.draw_traingle(frame, ball["bbox"], (0, 165, 255))
+                else:
+                    # Green for detected positions
+                    frame = self.draw_traingle(frame, ball["bbox"], (0, 255, 0))
 
             output_video_frames.append(frame)
 
