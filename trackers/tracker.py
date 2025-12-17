@@ -132,7 +132,7 @@ class Tracker:
                 for object_ind, class_id in enumerate(detection_supervision.class_id):
                     if cls_names[class_id] == "goalkeeper":
                         detection_supervision.class_id[object_ind] = cls_names_inv["player"]
-                detection_with_tracks = self.tracker.update_with_detections(detection_supervision)
+            detection_with_tracks = self.tracker.update_with_detections(detection_supervision)
 
             tracks["players"].append({})
             tracks["referees"].append({})
@@ -311,7 +311,7 @@ class Tracker:
             # Draw ball path first (so it appears behind the ball)
             if self.ball_path is not None:
                 frame = self.ball_path.draw_path(frame, thickness=3, draw_arrows=True, arrow_frequency=15)
-            
+
             # Draw ball
             for track_id, ball in ball_dict.items():
                 # Use different color for predicted positions
