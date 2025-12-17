@@ -1,2 +1,33 @@
-# created by virtualenv automatically
-*
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+Scripts/
+share/
+pyvenv.cfg
+venv/
+env/
+
+# Tracker stubs (generated files)
+tracker_stubs/*.pkl
+
+# Output files
+output_videos/*.mp4
+output_videos/*.avi
+output_videos/*.csv
+!output_videos/.gitkeep
+
+# Logs
+*.log
+processing.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
