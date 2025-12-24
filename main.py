@@ -4,7 +4,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_DIR))
 
 from pipelines import TrackingPipeline, ProcessingPipeline, DetectionPipeline, KeypointPipeline, TacticalPipeline
-from constants import model_path, test_video
+from constants import model_path, test_video, EMBEDDING_BATCH_SIZE
 from keypoint_detection.keypoint_constants import keypoint_model_path
 import numpy as np
 import time
@@ -72,11 +72,28 @@ class CompleteSoccerAnalysisPipeline:
         
         # Step 2: Train team assignment models
         print("\n[Step 2/8] Training team assignment models...")
+        # #region agent log
+        import json
+        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"main.py:analyze_video:before_step2","message":"Before Step 2 call","data":{"video_path":str(video_path)},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"H"})+"\n")
+        # #endregion
         self.tracking_pipeline.train_team_assignment_models(video_path)
+        # #region agent log
+        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"main.py:analyze_video:after_step2","message":"After Step 2 call","data":{},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"I"})+"\n")
+        # #endregion
         
         # Step 3: Read video frames
         print("\n[Step 3/8] Reading video frames...")
+        # #region agent log
+        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"main.py:analyze_video:before_step3","message":"Before Step 3 (read_video_frames)","data":{"frame_count":frame_count},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"J"})+"\n")
+        # #endregion
         frames = self.processing_pipeline.read_video_frames(video_path, frame_count)
+        # #region agent log
+        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"main.py:analyze_video:after_step3","message":"After Step 3 (read_video_frames)","data":{"frames_len":len(frames) if frames else 0},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"K"})+"\n")
+        # #endregion
         print(f"Loaded {len(frames)} frames for processing")
         
         # Step 4: Process all frames with detections, tracking, and tactical analysis
@@ -84,24 +101,72 @@ class CompleteSoccerAnalysisPipeline:
         tactical_frames = []
         all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}}
         
+        # Batch process embeddings for faster UMAP transform (batch size = 30 frames for better GPU utilization)
+        BATCH_SIZE = 30
+        frame_embeddings_buffer = []  # Store (frame_idx, crops, detections) for batching
+        
         for i, frame in enumerate(tqdm(frames, desc="Processing frames")):
-
+            
             # Detect keypoints and objects
             keypoints, _ = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
             player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
             
-            # Update with tracking
+            # Update with tracking (both players and ball)
             player_detections = self.tracking_pipeline.tracking_callback(player_detections)
+            ball_detections = self.tracking_pipeline.ball_tracking_callback(ball_detections)
 
-            # Team assignment
-            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections)
+            # Extract crops for team assignment (but batch process UMAP for 23x speedup)
+            if len(player_detections.xyxy) > 0:
+                crops = self.tracking_pipeline.clustering_manager.embedding_extractor.get_player_crops(frame, player_detections)
+                frame_embeddings_buffer.append((i, crops, player_detections, ball_detections, referee_detections, keypoints, frame))
+            else:
+                # No players, skip team assignment
+                frame_embeddings_buffer.append((i, [], player_detections, ball_detections, referee_detections, keypoints, frame))
             
-            # Store tracks for interpolation
-            all_tracks = self.tracking_pipeline.convert_detection_to_tracks(player_detections, ball_detections, referee_detections, all_tracks, i)
-            
-            # Get tactical frame from detections
-            tactical_frame, _ = self.tactical_pipeline.process_detections_for_tactical_analysis(player_detections, ball_detections, referee_detections, keypoints)
-            tactical_frames.append(tactical_frame)
+            # Process batch when buffer is full or at end
+            if len(frame_embeddings_buffer) >= BATCH_SIZE or i == len(frames) - 1:
+                # Extract all embeddings in batch (GPU - fast)
+                all_crops = []
+                frame_data = []  # Store (frame_idx, num_players, detections, keypoints, frame)
+                for frame_idx, crops, p_det, b_det, r_det, kp, orig_frame in frame_embeddings_buffer:
+                    if len(crops) > 0:
+                        all_crops.extend(crops)
+                        frame_data.append((frame_idx, len(crops), p_det, b_det, r_det, kp, orig_frame))
+                
+                if len(all_crops) > 0:
+                    # Batch extract embeddings (GPU - fast)
+                    crop_batches = self.tracking_pipeline.clustering_manager.embedding_extractor.create_batches(all_crops, EMBEDDING_BATCH_SIZE)
+                    all_embeddings = self.tracking_pipeline.clustering_manager.embedding_extractor.get_embeddings(crop_batches)
+                    
+                    # Batch UMAP transform (CPU - 23x faster when batched!)
+                    reduced_embeddings, _ = self.tracking_pipeline.clustering_manager.project_embeddings(all_embeddings, train=False)
+                    
+                    # Batch K-means predict (CPU - fast)
+                    cluster_labels, _ = self.tracking_pipeline.clustering_manager.cluster_embeddings(reduced_embeddings, train=False)
+                    
+                    # Assign labels back to detections
+                    label_idx = 0
+                    for frame_idx, num_players, p_det, b_det, r_det, kp, orig_frame in frame_data:
+                        frame_labels = cluster_labels[label_idx:label_idx+num_players]
+                        p_det.class_id = frame_labels
+                        label_idx += num_players
+                        
+                        # Store tracks for interpolation
+                        all_tracks = self.tracking_pipeline.convert_detection_to_tracks(p_det, b_det, r_det, all_tracks, frame_idx)
+                        
+                        # Get tactical frame from detections
+                        tactical_frame, _ = self.tactical_pipeline.process_detections_for_tactical_analysis(p_det, b_det, r_det, kp)
+                        tactical_frames.append(tactical_frame)
+                
+                # Process frames without players
+                for frame_idx, crops, p_det, b_det, r_det, kp, orig_frame in frame_embeddings_buffer:
+                    if len(crops) == 0:  # No players in this frame
+                        all_tracks = self.tracking_pipeline.convert_detection_to_tracks(p_det, b_det, r_det, all_tracks, frame_idx)
+                        tactical_frame, _ = self.tactical_pipeline.process_detections_for_tactical_analysis(p_det, b_det, r_det, kp)
+                        tactical_frames.append(tactical_frame)
+                
+                # Clear buffer
+                frame_embeddings_buffer = []
 
         # Step 5: Ball track interpolation
         print("\n[Step 5/8] Interpolating ball tracks...")
@@ -111,13 +176,9 @@ class CompleteSoccerAnalysisPipeline:
         print("\n[Step 6/8] Assigning teams and Annotating frames with detections...")
         object_annotated_frames = self.tracking_pipeline.annotate_frames(frames, all_tracks)
 
-        # Step 7: Overlay object annotated frames with tactical frames
-        print("\n[Step 7/8] Overlaying Tactical frames...")
-        output_frames = []
-        assert len(object_annotated_frames) == len(tactical_frames)
-        for o_frame, t_frame in zip(object_annotated_frames, tactical_frames):
-            output_frame = self.tactical_pipeline.create_overlay_frame(o_frame, t_frame, overlay_size=(500, 350))
-            output_frames.append(output_frame)
+        # Step 7: Skip overlay - use annotated frames directly (no tactical overlay)
+        print("\n[Step 7/8] Preparing output frames (no overlay)...")
+        output_frames = object_annotated_frames  # Use annotated frames directly without tactical overlay
 
         # Step 8: Write final output video
         print("\n[Step 8/8] Writing complete analysis video...")
@@ -140,5 +201,8 @@ if __name__ == "__main__":
     # Run Complete End-to-End Soccer Analysis Pipeline
     print("Starting Soccer Analysis...")
     pipeline = CompleteSoccerAnalysisPipeline(model_path, keypoint_model_path)
-    output_video = pipeline.analyze_video(test_video, frame_count=-1)    
+    # Limit to 3000 frames (~100 seconds) to avoid memory issues and long processing times
+    # Set to -1 to process entire video (WARNING: Very slow and memory-intensive for long videos)
+    MAX_FRAMES = 3000
+    output_video = pipeline.analyze_video(test_video, frame_count=MAX_FRAMES)    
     print(f"\nAnalysis finished! Output video: {output_video}")

@@ -40,6 +40,7 @@ class TrackingPipeline:
         self.detection_pipeline = DetectionPipeline(model_path)
         self.processing_pipeline = ProcessingPipeline()
         self.tracker_manager = None
+        self.ball_tracker_manager = None  # Separate tracker for ball
         self.clustering_manager = None
         self.annotator_manager = None
         
@@ -52,9 +53,13 @@ class TrackingPipeline:
         print("Initializing detection pipeline...")
         self.detection_pipeline.initialize_model()
         
-        # Initialize tracker
-        print("Initializing tracker...")
+        # Initialize tracker for players
+        print("Initializing player tracker...")
         self.tracker_manager = TrackerManager()
+        
+        # Initialize separate tracker for ball (with higher match threshold for consistency)
+        print("Initializing ball tracker...")
+        self.ball_tracker_manager = TrackerManager(match_thresh=0.6, track_buffer=60)
         
         # Initialize clustering manager
         print("Initializing clustering manager...")
@@ -79,8 +84,8 @@ class TrackingPipeline:
         """
         print("Collecting player crops for training...")
         
-        # Get video frames
-        frame_generator = sv.get_video_frames_generator(video_path, stride=12, end=120*24)
+        # Get video frames (don't specify end to handle short videos)
+        frame_generator = sv.get_video_frames_generator(video_path, stride=12)
         
         # Extract player crops
         crops = []
@@ -105,16 +110,41 @@ class TrackingPipeline:
         print("Training team assignment models...")
         training_time = time.time()
         
-        # Collect training crops
-        crops = self.collect_training_crops(video_path)
-        
-        # Train clustering models
-        cluster_labels, reducer, cluster_model = self.clustering_manager.train_clustering_models(crops)
-        
-        training_time = time.time() - training_time
-        print(f"Team assignment training completed in {training_time:.2f}s")
-        
-        return cluster_labels, reducer, cluster_model
+        try:
+            # Collect training crops
+            print("[Step 2.1/8] Collecting training crops from video...")
+            crops = self.collect_training_crops(video_path)
+            
+            if len(crops) == 0:
+                raise ValueError("No player crops collected from video. Check video path and detection model.")
+            
+            # Train clustering models
+            print(f"[Step 2.2/8] Training clustering models on {len(crops)} crops...")
+            # #region agent log
+            import json
+            with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"location":"tracking_pipeline.py:train_team_assignment_models:before_train","message":"Before train_clustering_models call","data":{"crops_len":len(crops)},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"E"})+"\n")
+            # #endregion
+            cluster_labels, reducer, cluster_model = self.clustering_manager.train_clustering_models(crops)
+            # #region agent log
+            with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"location":"tracking_pipeline.py:train_team_assignment_models:after_train","message":"After train_clustering_models call","data":{"cluster_labels_len":len(cluster_labels) if hasattr(cluster_labels,'__len__') else 'unknown'},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"F"})+"\n")
+            # #endregion
+            
+            training_time = time.time() - training_time
+            print(f"✅ Team assignment training completed in {training_time:.2f}s")
+            print(f"   - Collected {len(crops)} player crops")
+            print(f"   - Assigned to {len(set(cluster_labels))} teams")
+            # #region agent log
+            with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"location":"tracking_pipeline.py:train_team_assignment_models:before_return","message":"About to return from train_team_assignment_models","data":{"training_time":training_time},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"G"})+"\n")
+            # #endregion
+            
+            return cluster_labels, reducer, cluster_model
+        except Exception as e:
+            training_time = time.time() - training_time
+            print(f"❌ Team assignment training failed after {training_time:.2f}s: {type(e).__name__}: {str(e)}")
+            raise
     
     def detection_callback(self, frame):
         """
@@ -143,6 +173,37 @@ class TrackingPipeline:
             Updated player detections with tracking information
         """
         return self.tracker_manager.process_tracking_for_frame(player_detections)
+    
+    def ball_tracking_callback(self, ball_detections):
+        """
+        Tracking callback for updating ball tracks using ByteTrack.
+        This ensures consistent ball tracking across frames.
+        
+        Args:
+            ball_detections: Ball detection results
+            
+        Returns:
+            Updated ball detections with tracking IDs (filtered to best detection)
+        """
+        if ball_detections is None or len(ball_detections.xyxy) == 0:
+            return ball_detections
+        
+        # Track ball with ByteTrack
+        tracked_ball = self.ball_tracker_manager.update_player_detections(ball_detections)
+        
+        # If multiple detections, choose the one with the longest track (most consistent)
+        if len(tracked_ball.xyxy) > 1 and tracked_ball.tracker_id is not None:
+            # Filter to only active tracks (confidence > 0.5 if available)
+            if hasattr(tracked_ball, 'confidence') and tracked_ball.confidence is not None:
+                high_conf_mask = tracked_ball.confidence > 0.5
+                if high_conf_mask.any():
+                    tracked_ball = tracked_ball[high_conf_mask]
+            
+            # If still multiple, take the first one (ByteTrack already filtered by consistency)
+            if len(tracked_ball.xyxy) > 1:
+                tracked_ball = tracked_ball[0:1]
+        
+        return tracked_ball
     
     def clustering_callback(self, frame, player_detections):
         """

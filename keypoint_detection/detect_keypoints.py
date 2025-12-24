@@ -15,39 +15,94 @@ sys.path.append(str(PROJECT_DIR))
 
 from ultralytics import YOLO
 import supervision as sv
+import torch
+
+# Import GPU settings from constants
+try:
+    from constants import USE_GPU, GPU_DEVICE
+except ImportError:
+    USE_GPU = True
+    GPU_DEVICE = 0
 
 # ================================================
 # Core Detection Functions
 # ================================================
 
+def get_device():
+    """Get the appropriate device for inference."""
+    if USE_GPU and torch.cuda.is_available():
+        try:
+            # Check if GPU is compatible by testing a simple operation
+            device = GPU_DEVICE if isinstance(GPU_DEVICE, int) else 0
+            test_tensor = torch.zeros(1).to(f'cuda:{device}')
+            _ = test_tensor * 2  # Simple operation to test compatibility
+            return device
+        except RuntimeError as e:
+            if "no kernel image" in str(e) or "CUDA capability" in str(e):
+                print(f"⚠️  GPU not compatible with current PyTorch version. Falling back to CPU.")
+                print(f"   Error: {e}")
+                return 'cpu'
+            raise
+    return 'cpu'
+
 def load_keypoint_model(model_path: str) -> YOLO:
-    """Load and return a YOLO pose estimation model for keypoint detection.
+    """Load and return a YOLO pose estimation model for keypoint detection with GPU optimization.
     
     Args:
         model_path: Path to the YOLO pose model file
         
     Returns:
-        YOLO model instance configured for pose estimation
+        YOLO model instance configured for pose estimation on GPU or CPU
     """
-    model = YOLO(model_path)
+    device = get_device()
+    # YOLO will automatically use the device, but we can specify it
+    if device == 'cpu':
+        # Force CPU to avoid CUDA compatibility issues
+        model = YOLO(model_path)
+        model.to('cpu')
+    else:
+        try:
+            model = YOLO(model_path)
+            model.to(device)
+        except RuntimeError as e:
+            if "no kernel image" in str(e) or "CUDA capability" in str(e):
+                print(f"⚠️  GPU incompatible, using CPU instead")
+                model = YOLO(model_path)
+                model.to('cpu')
+            else:
+                raise
     return model
 
 
-def detect_keypoints_in_frames(model: YOLO, frames) -> List:
-    """Detect keypoints in video frames using YOLO pose model.
+def detect_keypoints_in_frames(model: YOLO, frames, device: str = None) -> List:
+    """Detect keypoints in video frames using YOLO pose model with GPU acceleration.
     
     Args:
         model: Loaded YOLO pose model
         frames: Video frames or single frame
+        device: Device to use for inference (auto-detected if None)
         
     Returns:
         Detection results from YOLO pose model containing keypoints
     """
-    return model(frames)
+    if device is None:
+        device = get_device()
+    
+    # Use device parameter for inference with error handling
+    try:
+        if device != 'cpu':
+            return model(frames, device=device)
+        else:
+            return model(frames, device='cpu')
+    except RuntimeError as e:
+        if "no kernel image" in str(e) or "CUDA capability" in str(e):
+            print(f"⚠️  GPU operation failed, retrying with CPU")
+            return model(frames, device='cpu')
+        raise
 
 
 def get_keypoint_detections(keypoint_model: YOLO, frame: np.ndarray) -> Tuple[sv.Detections, np.ndarray]:
-    """Get keypoint detections and extract keypoint coordinates.
+    """Get keypoint detections and extract keypoint coordinates with GPU acceleration.
     
     Args:
         keypoint_model: Loaded YOLO pose model
@@ -57,7 +112,8 @@ def get_keypoint_detections(keypoint_model: YOLO, frame: np.ndarray) -> Tuple[sv
         Tuple of (detections, keypoints) where keypoints is array of shape (N, 27, 3)
         for N detections with 27 keypoints each having (x, y, visibility)
     """
-    results = detect_keypoints_in_frames(keypoint_model, frame)[0]
+    device = get_device()
+    results = detect_keypoints_in_frames(keypoint_model, frame, device=device)[0]
     detections = sv.Detections.from_ultralytics(results)
     
     # Extract keypoints if available

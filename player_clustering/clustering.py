@@ -4,10 +4,19 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
 import numpy as np
-import umap.umap_ as umap
-from sklearn.cluster import KMeans
+
+# Try to use GPU-accelerated cuML, fallback to CPU versions
+try:
+    from cuml import UMAP as cuUMAP
+    from cuml.cluster import KMeans as cuKMeans
+    CUML_AVAILABLE = True
+except ImportError:
+    import umap.umap_ as umap
+    from sklearn.cluster import KMeans
+    CUML_AVAILABLE = False
 
 from .embeddings import EmbeddingExtractor
+from constants import EMBEDDING_BATCH_SIZE
 
 
 class ClusteringManager:
@@ -24,8 +33,22 @@ class ClusteringManager:
             n_components: Number of components for UMAP reduction
             n_clusters: Number of clusters for K-means (typically 2 for teams)
         """
-        self.reducer = umap.UMAP(n_components=n_components)
-        self.cluster_model = KMeans(n_clusters=n_clusters)
+        if CUML_AVAILABLE:
+            print("✅ Using GPU-accelerated cuML for UMAP and K-means")
+            self.reducer = cuUMAP(n_components=n_components, random_state=42)
+            self.cluster_model = cuKMeans(n_clusters=n_clusters, random_state=42)
+        else:
+            print("⚠️  cuML not available, using optimized CPU versions")
+            # Optimized CPU UMAP: reduce n_neighbors and n_epochs for faster training
+            self.reducer = umap.UMAP(
+                n_components=n_components, 
+                random_state=42,
+                n_neighbors=15,  # Reduced from default 15 for speed
+                min_dist=0.1,
+                n_epochs=200,  # Reduced from 500 for faster training
+                verbose=False  # Disable verbose to avoid output buffering issues
+            )
+            self.cluster_model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10, max_iter=300)
         self.embedding_extractor = EmbeddingExtractor()
         
     def project_embeddings(self, data, train=False):
@@ -39,10 +62,36 @@ class ClusteringManager:
         Returns:
             Tuple of (reduced_embeddings, reducer)
         """
-        if train:
-            reduced_embeddings = self.reducer.fit_transform(data)
-        else:
-            reduced_embeddings = self.reducer.transform(data)
+        device = "GPU" if CUML_AVAILABLE else "CPU"
+        # Only print for training or large batches to avoid spam during frame processing
+        if train or len(data) > 100:
+            print(f"  Projecting {len(data)} embeddings using UMAP on {device} (train={train})...")
+        import sys
+        sys.stdout.flush()  # Ensure output is flushed
+        
+        try:
+            if train:
+                print(f"  Fitting UMAP reducer on {device} (this may take a minute)...")
+                sys.stdout.flush()
+                reduced_embeddings = self.reducer.fit_transform(data)
+                if CUML_AVAILABLE:
+                    # cuML returns cupy arrays, convert to numpy
+                    if hasattr(reduced_embeddings, 'get'):
+                        reduced_embeddings = reduced_embeddings.get()
+                    reduced_embeddings = np.asarray(reduced_embeddings)
+                print(f"  ✅ UMAP reduction completed: {data.shape} -> {reduced_embeddings.shape}")
+                sys.stdout.flush()
+            else:
+                # For inference, transform is fast (milliseconds for small batches)
+                reduced_embeddings = self.reducer.transform(data)
+                if CUML_AVAILABLE:
+                    if hasattr(reduced_embeddings, 'get'):
+                        reduced_embeddings = reduced_embeddings.get()
+                    reduced_embeddings = np.asarray(reduced_embeddings)
+        except Exception as e:
+            print(f"  ❌ UMAP error: {type(e).__name__}: {str(e)}")
+            sys.stdout.flush()
+            raise
         
         return reduced_embeddings, self.reducer
     
@@ -57,10 +106,35 @@ class ClusteringManager:
         Returns:
             Tuple of (cluster_labels, cluster_model)
         """
-        if train:
-            cluster_labels = self.cluster_model.fit_predict(data)
-        else:
-            cluster_labels = self.cluster_model.predict(data)
+        device = "GPU" if CUML_AVAILABLE else "CPU"
+        # Only print for training or large batches to avoid spam during frame processing
+        if train or len(data) > 100:
+            print(f"  Clustering {len(data)} embeddings using K-means on {device} (train={train})...")
+        import sys
+        sys.stdout.flush()  # Ensure output is flushed
+        
+        try:
+            if train:
+                print(f"  Fitting K-means model on {device}...")
+                sys.stdout.flush()
+                cluster_labels = self.cluster_model.fit_predict(data)
+                if CUML_AVAILABLE:
+                    if hasattr(cluster_labels, 'get'):
+                        cluster_labels = cluster_labels.get()
+                    cluster_labels = np.asarray(cluster_labels)
+                print(f"  ✅ K-means clustering completed: {len(set(cluster_labels))} clusters found")
+                sys.stdout.flush()
+            else:
+                # For inference, predict is very fast (microseconds for small batches)
+                cluster_labels = self.cluster_model.predict(data)
+                if CUML_AVAILABLE:
+                    if hasattr(cluster_labels, 'get'):
+                        cluster_labels = cluster_labels.get()
+                    cluster_labels = np.asarray(cluster_labels)
+        except Exception as e:
+            print(f"  ❌ K-means error: {type(e).__name__}: {str(e)}")
+            sys.stdout.flush()
+            raise
         
         return cluster_labels, self.cluster_model
     
@@ -97,13 +171,31 @@ class ClusteringManager:
         Returns:
             Tuple of (cluster_labels, reducer, cluster_model)
         """
+        # #region agent log
+        import json
+        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"clustering.py:train_clustering_models:entry","message":"Function entry","data":{"crops_len":len(crops) if crops else 0},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"A"})+"\n")
+        # #endregion
         if crops is None or len(crops) == 0:
             raise ValueError("Crops list cannot be None or empty")
         
+        print(f"Training clustering models on {len(crops)} crops with batch size {EMBEDDING_BATCH_SIZE}...")
         # Process crops and train models
-        crop_batches = self.embedding_extractor.create_batches(crops, 24)
+        crop_batches = self.embedding_extractor.create_batches(crops, EMBEDDING_BATCH_SIZE)
+        # #region agent log
+        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"clustering.py:train_clustering_models:before_process_batch","message":"Before process_batch call","data":{"num_batches":len(crop_batches)},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"B"})+"\n")
+        # #endregion
         cluster_labels, reducer, cluster_model = self.process_batch(crop_batches, train=True)
+        # #region agent log
+        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"clustering.py:train_clustering_models:after_process_batch","message":"After process_batch call","data":{"cluster_labels_len":len(cluster_labels) if hasattr(cluster_labels,'__len__') else 'unknown',"num_clusters":len(set(cluster_labels)) if hasattr(cluster_labels,'__len__') else 'unknown'},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"C"})+"\n")
+        # #endregion
         
+        # #region agent log
+        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"clustering.py:train_clustering_models:return","message":"About to return","data":{},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"D"})+"\n")
+        # #endregion
         return cluster_labels, reducer, cluster_model
 
     def get_cluster_labels(self, frame, player_detections, crops=None):

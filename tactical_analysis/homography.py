@@ -37,7 +37,7 @@ class HomographyTransformer:
             [6000, 3500],  # Center Point
             [9069, 3500],  # Right semicircle rightmost point
         ])
-        return np.concat((all_pitch_points, extra_pitch_points))
+        return np.concatenate((all_pitch_points, extra_pitch_points))
     
     def _get_keypoint_mapping(self):
         """Get mapping from our 29 keypoints to sports library's points."""
@@ -148,7 +148,7 @@ class HomographyTransformer:
         
         # Transform all pitch points to frame coordinates
         transformed_points = view_transformer.transform_points(points=self.all_pitch_points.copy())
-        transformed_points = np.concat((transformed_points, np.ones((len(transformed_points), 1), dtype=np.float32)), axis=1)
+        transformed_points = np.concatenate((transformed_points, np.ones((len(transformed_points), 1), dtype=np.float32)), axis=1)
         transformed_points = np.expand_dims(transformed_points, axis=0)
         
         return transformed_points, view_transformer

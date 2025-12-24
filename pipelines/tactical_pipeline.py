@@ -123,8 +123,9 @@ class TacticalPipeline:
         Returns:
             Tactical view frame as numpy array
         """
-        # Create pitch visualization
-        pitch_frame = draw_pitch(self.pitch_config)
+        # Create pitch visualization - start with blank frame
+        pitch_frame = np.zeros((frame_size[1], frame_size[0], 3), dtype=np.uint8)
+        pitch_frame = draw_pitch(pitch_frame, self.pitch_config)
         
         # Draw team 1 player positions (class_id 0)
         if len(player_points) > 0:

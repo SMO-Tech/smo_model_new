@@ -35,7 +35,7 @@ sys.path.append(str(PROJECT_DIR))
 
 # Path to the trained YOLO model
 # Download from: https://huggingface.co/Adit-jain/soccana
-model_path = r"Models\Trained\yolov11_sahi_1280\Model\weights\best.pt"
+model_path = r"Models/Trained/yolov11_sahi_1280/Model/weights/best.pt"
 model_path = PROJECT_DIR / model_path
 
 # Alternative model paths (uncomment if using different models)
@@ -48,7 +48,7 @@ model_path = PROJECT_DIR / model_path
 
 # Input test video path
 # UPDATE THIS: Point to your actual test video file
-test_video = r"F:\Datasets\SoccerNet\Data\Samples\3_min_samp.mp4"
+test_video = r"/root/Soccer_Analysis/video_segment.mp4"
 
 # Output video path
 # UPDATE THIS: Where you want the tracked video to be saved
@@ -70,7 +70,8 @@ TRAINING_FRAME_STRIDE = 12        # Skip frames during training data collection
 TRAINING_FRAME_LIMIT = 120 * 24   # Maximum frames for training (120*24 = ~2 mins at 24fps)
 
 # Clustering parameters  
-EMBEDDING_BATCH_SIZE = 24         # Batch size for SigLIP embedding extraction
+
+EMBEDDING_BATCH_SIZE = 128        # Batch size for SigLIP embedding extraction (increased for better GPU utilization)
 UMAP_COMPONENTS = 3               # UMAP dimensionality reduction components
 N_TEAMS = 2                       # Number of teams to cluster (usually 2)
 
@@ -105,6 +106,39 @@ CLASS_COLORS = {
 # GPU settings
 USE_GPU = True                    # Set to False to force CPU usage
 GPU_DEVICE = 0                    # GPU device index (if multiple GPUs)
+
+# Auto-detect GPU compatibility and fallback to CPU if needed
+# Note: RTX 5090 (sm_120) requires PyTorch 2.7.0+ for full support
+import warnings
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=UserWarning)  # Ignore sm_120 warning
+    try:
+        import torch
+        if torch.cuda.is_available():
+            # Test GPU with conv2d operation (used by models) to verify real compatibility
+            try:
+                conv = torch.nn.Conv2d(3, 64, 3).cuda()
+                test_input = torch.randn(1, 3, 224, 224).cuda()
+                output = conv(test_input)  # This will fail if sm_120 not supported
+                del conv, test_input, output
+                torch.cuda.empty_cache()
+                USE_GPU = True
+                print("✅ GPU is fully compatible and ready to use!")
+            except RuntimeError as conv_error:
+                if "no kernel image" in str(conv_error).lower():
+                    print("⚠️  GPU operations not fully supported (sm_120 requires PyTorch 2.7.0+)")
+                    print("   Auto-switching to CPU. See GPU_UPGRADE_GUIDE.md for upgrade options.")
+                    USE_GPU = False
+                else:
+                    raise
+        else:
+            USE_GPU = False
+            print("⚠️  CUDA not available, using CPU")
+    except (RuntimeError, Exception) as e:
+        error_str = str(e)
+        print(f"⚠️  GPU test failed: {error_str[:150]}")
+        print("   Auto-switching to CPU.")
+        USE_GPU = False
 
 # Processing settings
 MAX_VIDEO_FRAMES = -1             # Max frames to process (-1 for all frames)
