@@ -45,15 +45,17 @@ class DetectionPipeline:
             self.model = load_detection_model(self.model_path)
         return self.model
     
-    def detect_frame_objects(self, frame: np.ndarray) -> Tuple[sv.Detections, sv.Detections, sv.Detections]:
+    def detect_frame_objects(self, frame: np.ndarray) -> Tuple[sv.Detections, sv.Detections]:
         """
-        Detect players, ball, and referees in a single frame.
+        Detect players and referees in a single frame.
+        
+        Note: Ball detection has been removed.
         
         Args:
             frame: Input frame as numpy array
             
         Returns:
-            Tuple of (player_detections, ball_detections, referee_detections)
+            Tuple of (player_detections, referee_detections)
         """
         if self.model is None:
             self.initialize_model()
@@ -61,20 +63,21 @@ class DetectionPipeline:
         return get_detections(self.model, frame)
     
     def annotate_detections(self, frame: np.ndarray, player_detections: sv.Detections, 
-                          ball_detections: sv.Detections, referee_detections: sv.Detections) -> np.ndarray:
+                          referee_detections: sv.Detections) -> np.ndarray:
         """
         Annotate frame with detection results.
+        
+        Note: Ball annotation has been removed.
         
         Args:
             frame: Input frame
             player_detections: Player detection results
-            ball_detections: Ball detection results
             referee_detections: Referee detection results
             
         Returns:
             Annotated frame
         """
-        return self.annotator_manager.annotate_all(frame, player_detections, ball_detections, referee_detections)
+        return self.annotator_manager.annotate_all(frame, player_detections, None, referee_detections)
     
     def detect_in_video(self, video_path: str, output_path: str, frame_count: int = 300):
         """
@@ -92,8 +95,8 @@ class DetectionPipeline:
         print("Processing frames with detection...")
         annotated_frames = []
         for i, frame in enumerate(video_frames):
-            player_detections, ball_detections, referee_detections = self.detect_frame_objects(frame)
-            annotated_frame = self.annotate_detections(frame, player_detections, ball_detections, referee_detections)
+            player_detections, referee_detections = self.detect_frame_objects(frame)
+            annotated_frame = self.annotate_detections(frame, player_detections, referee_detections)
             annotated_frames.append(annotated_frame)
             
             if (i + 1) % 100 == 0:
@@ -123,8 +126,8 @@ class DetectionPipeline:
             if not success:
                 break
                 
-            player_detections, ball_detections, referee_detections = self.detect_frame_objects(frame)
-            annotated_frame = self.annotate_detections(frame, player_detections, ball_detections, referee_detections)
+            player_detections, referee_detections = self.detect_frame_objects(frame)
+            annotated_frame = self.annotate_detections(frame, player_detections, referee_detections)
             
             cv2.imshow("Soccer Analysis - Real-time Detection", annotated_frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):

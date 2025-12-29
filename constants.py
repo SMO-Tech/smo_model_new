@@ -48,7 +48,7 @@ model_path = PROJECT_DIR / model_path
 
 # Input test video path
 # UPDATE THIS: Point to your actual test video file
-test_video = r"/root/Soccer_Analysis/video_segment.mp4"
+test_video = str(PROJECT_DIR / "videos/youtube_video.mp4")
 
 # Output video path
 # UPDATE THIS: Where you want the tracked video to be saved
@@ -79,8 +79,10 @@ N_TEAMS = 2                       # Number of teams to cluster (usually 2)
 TRACKER_MATCH_THRESH = 0.5        # ByteTrack matching threshold
 TRACKER_BUFFER_SIZE = 120         # Number of frames to keep in tracking buffer
 
-# Ball interpolation
-BALL_INTERPOLATION_LIMIT = 30     # Max frames to interpolate missing ball detections
+# Pass Detection Configuration
+PASS_DETECTION_ENABLED = True     # Enable player-only pass detection
+PASS_MIN_CONFIDENCE = 0.5         # Minimum confidence to accept a pass
+PASS_FADE_FRAMES = 90              # Frames to keep pass lines visible (3 seconds at 30fps)
 
 # =============================================================================
 # DETECTION CLASSES

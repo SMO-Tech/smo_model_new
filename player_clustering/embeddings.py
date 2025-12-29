@@ -9,6 +9,8 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from more_itertools import chunked
+from PIL import Image
+import cv2
 
 # Import GPU settings from constants
 try:
@@ -84,9 +86,27 @@ class EmbeddingExtractor:
         cropped_images = []
         for boxes in player_detections.xyxy:
             cropped_image = sv.crop_image(frame, boxes)
-            cropped_images.append(cropped_image)
-        cropped_images = [sv.cv2_to_pillow(cropped_image) for cropped_image in cropped_images]
-        return cropped_images
+            # Skip empty crops (invalid bounding boxes)
+            if cropped_image is not None and cropped_image.size > 0:
+                cropped_images.append(cropped_image)
+        
+        # Convert OpenCV BGR to PIL RGB format
+        # Use direct conversion instead of sv.cv2_to_pillow for compatibility
+        pil_images = []
+        for cropped_image in cropped_images:
+            # Check if image is valid and not empty
+            if cropped_image is None or cropped_image.size == 0:
+                continue
+            try:
+                # Convert BGR to RGB
+                rgb_image = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB)
+                # Convert to PIL Image
+                pil_image = Image.fromarray(rgb_image)
+                pil_images.append(pil_image)
+            except cv2.error as e:
+                # Skip invalid crops (empty or malformed images)
+                continue
+        return pil_images
     
     def create_batches(self, data, batch_size=24):
         """

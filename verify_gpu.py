@@ -75,7 +75,7 @@ def check_gpu():
         print("❌ transformers: NOT INSTALLED")
     
     try:
-        import umap
+        import umap  # type: ignore
         print("✅ umap-learn: OK")
     except ImportError:
         print("❌ umap-learn: NOT INSTALLED")

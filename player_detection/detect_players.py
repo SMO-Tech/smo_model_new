@@ -1,7 +1,8 @@
 """Core Player Detection Functions for Soccer Analysis.
 
-This module provides core functionality for detecting players, ball, and referees
-using YOLO models. Pipeline functions have been moved to detection_pipeline.py.
+This module provides core functionality for detecting players and referees
+using YOLO models. Ball detection has been removed.
+Pipeline functions have been moved to detection_pipeline.py.
 """
 
 import sys
@@ -99,8 +100,10 @@ def detect_objects_in_frames(model: YOLO, frames, device: str = None) -> List:
             return model(frames, device='cpu')
         raise
 
-def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = False) -> Tuple[sv.Detections, sv.Detections, sv.Detections]:
-    """Get separated detections for players, ball, and referees with GPU acceleration.
+def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = False) -> Tuple[sv.Detections, sv.Detections]:
+    """Get separated detections for players and referees with GPU acceleration.
+    
+    Note: Ball detection has been removed. This function only returns players and referees.
     
     Args:
         detection_model: Loaded YOLO model
@@ -108,7 +111,7 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
         use_slicer: Whether to use inference slicer for large images
         
     Returns:
-        Tuple of (player_detections, ball_detections, referee_detections)
+        Tuple of (player_detections, referee_detections)
     """
     device = get_device()
     
@@ -124,9 +127,8 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
     else:
         detections = inference_callback(frame)
 
-    # Separate detections by class
+    # Separate detections by class (skip ball class_id == 1)
     player_detections = detections[detections.class_id == 0]
-    ball_detections = detections[detections.class_id == 1]
     referee_detections = detections[detections.class_id == 2]
 
-    return player_detections, ball_detections, referee_detections
+    return player_detections, referee_detections

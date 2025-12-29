@@ -171,31 +171,13 @@ class ClusteringManager:
         Returns:
             Tuple of (cluster_labels, reducer, cluster_model)
         """
-        # #region agent log
-        import json
-        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"clustering.py:train_clustering_models:entry","message":"Function entry","data":{"crops_len":len(crops) if crops else 0},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"A"})+"\n")
-        # #endregion
         if crops is None or len(crops) == 0:
             raise ValueError("Crops list cannot be None or empty")
         
         print(f"Training clustering models on {len(crops)} crops with batch size {EMBEDDING_BATCH_SIZE}...")
         # Process crops and train models
         crop_batches = self.embedding_extractor.create_batches(crops, EMBEDDING_BATCH_SIZE)
-        # #region agent log
-        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"clustering.py:train_clustering_models:before_process_batch","message":"Before process_batch call","data":{"num_batches":len(crop_batches)},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"B"})+"\n")
-        # #endregion
         cluster_labels, reducer, cluster_model = self.process_batch(crop_batches, train=True)
-        # #region agent log
-        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"clustering.py:train_clustering_models:after_process_batch","message":"After process_batch call","data":{"cluster_labels_len":len(cluster_labels) if hasattr(cluster_labels,'__len__') else 'unknown',"num_clusters":len(set(cluster_labels)) if hasattr(cluster_labels,'__len__') else 'unknown'},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"C"})+"\n")
-        # #endregion
-        
-        # #region agent log
-        with open('/root/Soccer_Analysis/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"location":"clustering.py:train_clustering_models:return","message":"About to return","data":{},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"D"})+"\n")
-        # #endregion
         return cluster_labels, reducer, cluster_model
 
     def get_cluster_labels(self, frame, player_detections, crops=None):

@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from typing import List, Dict
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
@@ -22,9 +23,18 @@ class AnnotatorManager:
         self.label_annotator = sv.LabelAnnotator()
         self.box_annotator = sv.BoxAnnotator()
 
-        # Keypoint annotators
-        self.vertex_annotator = sv.VertexAnnotator(color=sv.Color.GREEN, radius=8)
-        self.edge_annotator = sv.EdgeAnnotator(color=sv.Color.BLUE, thickness=3, edges=edges)
+        # Keypoint annotators (optional - only used if keypoint annotation is needed)
+        # Note: VertexAnnotator and EdgeAnnotator may not be available in all supervision versions
+        self.vertex_annotator = None
+        self.edge_annotator = None
+        try:
+            if hasattr(sv, 'VertexAnnotator'):
+                self.vertex_annotator = sv.VertexAnnotator(color=sv.Color.GREEN, radius=8)
+            if hasattr(sv, 'EdgeAnnotator'):
+                self.edge_annotator = sv.EdgeAnnotator(color=sv.Color.BLUE, thickness=3, edges=edges)
+        except AttributeError:
+            # Keypoint annotators not available - will use manual drawing in annotate_keypoints
+            pass
 
     def annotate_players(self, frame: np.ndarray, player_detections: sv.Detections) -> np.ndarray:
         """
@@ -48,20 +58,76 @@ class AnnotatorManager:
 
         return frame
 
-    def annotate_ball(self, frame: np.ndarray, ball_detections: sv.Detections) -> np.ndarray:
+    def annotate_passes(self, frame: np.ndarray, passes: List, player_positions: Dict[int, np.ndarray], 
+                       fade_frames: int = 90) -> np.ndarray:
         """
-        Annotate ball detections on frame.
-
+        Annotate pass lines between players on frame.
+        
         Args:
             frame: Input video frame
-            ball_detections: Ball detection results
-
+            passes: List of PassEvent objects to draw
+            player_positions: Dictionary mapping player_id to [x, y] frame coordinates
+            fade_frames: Number of frames to keep pass lines visible (default 90 = 3 seconds at 30fps)
+            
         Returns:
-            Annotated frame with ball detections
+            Annotated frame with pass lines
         """
-        if ball_detections is not None and len(ball_detections.xyxy) > 0:
-            return self.triangle_annotator.annotate(frame, ball_detections)
-        return frame
+        if not passes:
+            return frame
+        
+        annotated_frame = frame.copy()
+        current_frame = passes[0].end_frame if passes else 0
+        
+        for pass_event in passes:
+            # Only draw passes that are recent (within fade_frames)
+            if current_frame - pass_event.end_frame > fade_frames:
+                continue
+            
+            from_id = pass_event.from_player_id
+            to_id = pass_event.to_player_id
+            
+            if from_id not in player_positions or to_id not in player_positions:
+                continue
+            
+            # Get player positions in frame coordinates
+            from_pos = player_positions[from_id]
+            to_pos = player_positions[to_id]
+            
+            # Calculate fade alpha based on age
+            age = current_frame - pass_event.end_frame
+            alpha = max(0.3, 1.0 - (age / fade_frames))
+            
+            # Color based on team (purple for team 0, red for team 1)
+            if pass_event.team_id == 0:
+                color = (128, 0, 128)  # Purple
+            else:
+                color = (0, 0, 255)  # Red
+            
+            # Adjust color intensity based on confidence and fade
+            color_intensity = int(alpha * 255)
+            if pass_event.team_id == 0:
+                line_color = (int(color[0] * alpha), int(color[1] * alpha), int(color[2] * alpha))
+            else:
+                line_color = (int(color[0] * alpha), int(color[1] * alpha), int(color[2] * alpha))
+            
+            # Draw pass line
+            thickness = max(1, int(2 * alpha))
+            cv2.line(annotated_frame, 
+                    (int(from_pos[0]), int(from_pos[1])),
+                    (int(to_pos[0]), int(to_pos[1])),
+                    line_color, thickness)
+            
+            # Draw arrow head
+            angle = np.arctan2(to_pos[1] - from_pos[1], to_pos[0] - from_pos[0])
+            arrow_length = 10
+            arrow_x = int(to_pos[0] - arrow_length * np.cos(angle))
+            arrow_y = int(to_pos[1] - arrow_length * np.sin(angle))
+            cv2.line(annotated_frame,
+                    (int(to_pos[0]), int(to_pos[1])),
+                    (arrow_x, arrow_y),
+                    line_color, thickness)
+        
+        return annotated_frame
 
     def annotate_referees(self, frame: np.ndarray, referee_detections: sv.Detections) -> np.ndarray:
         """
@@ -82,12 +148,14 @@ class AnnotatorManager:
 
     def annotate_all(self, frame: np.ndarray, player_detections, ball_detections, referee_detections) -> np.ndarray:
         """
-        Annotate players, ball, and referees on the frame using separate methods.
+        Annotate players and referees on the frame using separate methods.
+        
+        Note: Ball detection has been removed. ball_detections parameter is ignored.
 
         Args:
             frame: Input video frame
             player_detections: Player detection results
-            ball_detections: Ball detection results
+            ball_detections: Ignored (kept for compatibility)
             referee_detections: Referee detection results
 
         Returns:
@@ -95,9 +163,8 @@ class AnnotatorManager:
         """
         target_frame = frame.copy()
 
-        # Annotate each type separately
+        # Annotate each type separately (ball annotation removed)
         target_frame = self.annotate_players(target_frame, player_detections)
-        target_frame = self.annotate_ball(target_frame, ball_detections)
         target_frame = self.annotate_referees(target_frame, referee_detections)
 
         return target_frame
@@ -187,15 +254,17 @@ class AnnotatorManager:
     def convert_tracks_to_detections(self, player_tracks, ball_tracks, referee_tracks, player_classids=None):
         """
         Convert tracking data back to supervision detections format.
+        
+        Note: ball_tracks parameter is ignored (ball tracking removed).
 
         Args:
             player_tracks: Player tracking data for a frame
-            ball_tracks: Ball tracking data for a frame
+            ball_tracks: Ignored (kept for compatibility)
             referee_tracks: Referee tracking data for a frame
             player_classids: Player class ID data for a frame (optional)
 
         Returns:
-            Tuple of converted detection objects
+            Tuple of converted detection objects (player_detections, None, referee_detections)
         """
         # Get the player detections
         if player_tracks is not None:
@@ -214,14 +283,8 @@ class AnnotatorManager:
         else:
             player_detections = None
 
-        # Get the ball detections
-        if ball_tracks is not None:
-            ball_detections = sv.Detections(
-                xyxy=np.array([ball_tracks]),
-                class_id=np.array([2]),
-            )
-        else:
-            ball_detections = None
+        # Ball detections always None (ball tracking removed)
+        ball_detections = None
 
         # Get the referee detections
         if referee_tracks is not None:
