@@ -15,7 +15,7 @@ sys.path.append(str(PROJECT_DIR))
 from constants import model_path
 from keypoint_detection.keypoint_constants import keypoint_model_path
 from pipelines import DetectionPipeline, KeypointPipeline, TrackingPipeline, TacticalPipeline
-from pass_detection import PlayerOnlyPassDetector
+from pass_detection import HybridPassManager
 
 
 def check_model_path(model_path: Path, model_name: str) -> bool:
@@ -82,7 +82,8 @@ def load_all_models():
         print("✅ Tactical pipeline initialized successfully")
         
         print("Initializing Pass Detector...")
-        pass_detector = PlayerOnlyPassDetector()
+        pass_config = {'fps': 30.0}
+        pass_detector = HybridPassManager(pass_config)
         print("✅ Pass detector initialized successfully")
         
         load_time = time.time() - start_time

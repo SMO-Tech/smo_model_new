@@ -77,9 +77,10 @@ class HybridPassManager:
         self.ball_validations: List[Dict] = []
         self.rejected_candidates: List[Dict] = []
         
-        # Duplicate prevention
+        # Duplicate prevention (frame-based, not time-based)
         self.recent_passes: List[Tuple[int, int, int, int]] = []  # (from, to, start, end)
-        self.initiator_cooldowns: Dict[int, float] = {}  # player_id -> cooldown_end_time
+        self.initiator_cooldowns: Dict[int, int] = {}  # player_id -> cooldown_end_frame
+        self.pair_cooldowns: Dict[Tuple[int, int], int] = {}  # (from, to) -> cooldown_end_frame
         
         # Metrics
         self.metrics = {
@@ -124,10 +125,10 @@ class HybridPassManager:
         for player_id, team_id in player_teams.items():
             self.set_team(player_id, team_id)
         
-        # Update ball tracker
+        # Update ball tracker FIRST (this must happen every frame)
         ball_obs = self.ball_tracker.update(frame, ball_detections)
         
-        # Generate player candidates
+        # Generate player candidates (always generate - validator will reject if ball is LOST)
         candidates = self.candidate_generator.generate_candidates(
             frame, player_positions, player_teams
         )
@@ -175,6 +176,12 @@ class HybridPassManager:
                 )
                 
                 if final_confidence >= self.config['min_final_confidence']:
+                    # Check pair cooldown (same initiator->receiver)
+                    if self._is_pair_in_cooldown(candidate.initiator_id, candidate.receiver_id, frame):
+                        self.metrics['rejected_cooldown'] += 1
+                        self._reject_candidate(candidate, "pair_cooldown")
+                        continue
+                    
                     # Create final pass event
                     pass_event = self._create_pass_event(
                         candidate, validation, frame
@@ -193,9 +200,13 @@ class HybridPassManager:
                             pass_event.end_frame
                         ))
                         
-                        # Set cooldown
-                        cooldown_end = time.time() + self.config['cooldown_duration']
-                        self.initiator_cooldowns[pass_event.from_player_id] = cooldown_end
+                        # Set cooldowns (frame-based)
+                        cooldown_frames = int(self.config['cooldown_duration'] * self.config['fps'])
+                        self.initiator_cooldowns[pass_event.from_player_id] = frame + cooldown_frames
+                        
+                        # Set pair cooldown (prevents same pair for longer)
+                        pair_lock_frames = int(self.config['pair_lock_duration'] * self.config['fps'])
+                        self.pair_cooldowns[(pass_event.from_player_id, pass_event.to_player_id)] = frame + pair_lock_frames
                         
                         # Keep recent passes limited
                         if len(self.recent_passes) > 100:
@@ -226,12 +237,21 @@ class HybridPassManager:
         return False
     
     def _is_in_cooldown(self, player_id: int, frame: int) -> bool:
-        """Check if player is in cooldown."""
+        """Check if player is in cooldown (frame-based)."""
         if player_id not in self.initiator_cooldowns:
             return False
         
-        cooldown_end = self.initiator_cooldowns[player_id]
-        return time.time() < cooldown_end
+        cooldown_end_frame = self.initiator_cooldowns[player_id]
+        return frame < cooldown_end_frame
+    
+    def _is_pair_in_cooldown(self, from_id: int, to_id: int, frame: int) -> bool:
+        """Check if player pair is in cooldown (prevents same pair passes in quick succession)."""
+        pair_key = (from_id, to_id)
+        if pair_key not in self.pair_cooldowns:
+            return False
+        
+        cooldown_end_frame = self.pair_cooldowns[pair_key]
+        return frame < cooldown_end_frame
     
     def _create_pass_event(self, candidate: PassCandidate,
                           validation: BallValidationResult,
