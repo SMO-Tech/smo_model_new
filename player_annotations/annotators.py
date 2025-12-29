@@ -59,15 +59,19 @@ class AnnotatorManager:
         return frame
 
     def annotate_passes(self, frame: np.ndarray, passes: List, player_positions: Dict[int, np.ndarray], 
-                       fade_frames: int = 90) -> np.ndarray:
+                       fade_frames: int = 90, current_frame: int = None) -> np.ndarray:
         """
         Annotate pass lines between players on frame.
         
+        Only draws accepted passes (PassEvent objects that passed validation).
+        Passes fade out after fade_frames.
+        
         Args:
             frame: Input video frame
-            passes: List of PassEvent objects to draw
+            passes: List of PassEvent objects to draw (only accepted passes)
             player_positions: Dictionary mapping player_id to [x, y] frame coordinates
             fade_frames: Number of frames to keep pass lines visible (default 90 = 3 seconds at 30fps)
+            current_frame: Current frame index (if None, uses max end_frame from passes)
             
         Returns:
             Annotated frame with pass lines
@@ -76,11 +80,14 @@ class AnnotatorManager:
             return frame
         
         annotated_frame = frame.copy()
-        current_frame = passes[0].end_frame if passes else 0
+        # Use provided current_frame or infer from passes
+        if current_frame is None:
+            current_frame = max([p.end_frame for p in passes]) if passes else 0
         
         for pass_event in passes:
-            # Only draw passes that are recent (within fade_frames)
-            if current_frame - pass_event.end_frame > fade_frames:
+            # Only draw passes that are recent (within fade_frames after end)
+            age = current_frame - pass_event.end_frame
+            if age < 0 or age > fade_frames:
                 continue
             
             from_id = pass_event.from_player_id

@@ -100,10 +100,8 @@ def detect_objects_in_frames(model: YOLO, frames, device: str = None) -> List:
             return model(frames, device='cpu')
         raise
 
-def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = False) -> Tuple[sv.Detections, sv.Detections]:
-    """Get separated detections for players and referees with GPU acceleration.
-    
-    Note: Ball detection has been removed. This function only returns players and referees.
+def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = False) -> Tuple[sv.Detections, sv.Detections, sv.Detections]:
+    """Get separated detections for players, ball, and referees with GPU acceleration.
     
     Args:
         detection_model: Loaded YOLO model
@@ -111,7 +109,7 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
         use_slicer: Whether to use inference slicer for large images
         
     Returns:
-        Tuple of (player_detections, referee_detections)
+        Tuple of (player_detections, ball_detections, referee_detections)
     """
     device = get_device()
     
@@ -127,8 +125,10 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
     else:
         detections = inference_callback(frame)
 
-    # Separate detections by class (skip ball class_id == 1)
+    # Separate detections by class
+    # Class 0 = Players, Class 1 = Ball, Class 2 = Referees
     player_detections = detections[detections.class_id == 0]
+    ball_detections = detections[detections.class_id == 1]
     referee_detections = detections[detections.class_id == 2]
 
-    return player_detections, referee_detections
+    return player_detections, ball_detections, referee_detections

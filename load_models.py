@@ -101,7 +101,7 @@ def load_all_models():
         
         # Test detection
         try:
-            player_detections, referee_detections = detection_pipeline.detect_frame_objects(dummy_frame)
+            player_detections, _, referee_detections = detection_pipeline.detect_frame_objects(dummy_frame)
             print(f"✅ Detection test: Found {len(player_detections.xyxy)} players, {len(referee_detections.xyxy)} referees")
         except Exception as e:
             print(f"❌ Detection test failed: {e}")

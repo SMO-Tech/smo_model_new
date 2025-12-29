@@ -85,7 +85,7 @@ class TrackingPipeline:
         # Extract player crops
         crops = []
         for frame in tqdm(frame_generator, desc='collecting_crops'):
-            player_detections, _ = self.detection_pipeline.detect_frame_objects(frame)
+            player_detections, _, _ = self.detection_pipeline.detect_frame_objects(frame)
             cropped_images = self.clustering_manager.embedding_extractor.get_player_crops(frame, player_detections)
             crops += cropped_images
         
@@ -139,7 +139,7 @@ class TrackingPipeline:
             Tuple of detection results (player, referee)
         """
         detection_time = time.time()
-        player_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
+        player_detections, _, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
         detection_time = time.time() - detection_time
         
         return player_detections, referee_detections, detection_time
@@ -283,7 +283,7 @@ class TrackingPipeline:
                 referee_tracks = None
             
             # Convert to detections with stored class IDs
-            player_detections, referee_detections = self.annotator_manager.convert_tracks_to_detections(
+            player_detections, ball_detections, referee_detections = self.annotator_manager.convert_tracks_to_detections(
                 player_tracks, None, referee_tracks, player_classids
             )
             

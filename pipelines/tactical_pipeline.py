@@ -68,7 +68,7 @@ class TacticalPipeline:
             frame: Input frame as numpy array
             
         Returns:
-            Tuple of (player_detections, referee_detections)
+            Tuple of (player_detections, ball_detections, referee_detections)
         """
         return self.detection_pipeline.detect_frame_objects(frame)
     
@@ -230,7 +230,7 @@ class TacticalPipeline:
         """
         # Detect keypoints and objects
         keypoints = self.detect_frame_keypoints(frame)
-        player_detections, referee_detections = self.detect_frame_objects(frame)
+        player_detections, _, referee_detections = self.detect_frame_objects(frame)
 
         # Process the Detections
         tactical_frame, metadata = self.process_detections_for_tactical_analysis(player_detections, referee_detections, keypoints)
