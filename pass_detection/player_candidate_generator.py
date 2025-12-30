@@ -62,22 +62,22 @@ class PlayerCandidateGenerator:
             config: Configuration dictionary
         """
         self.config = {
-            # Looser thresholds for candidate generation
-            'velocity_spike_threshold': 1.2,  # Lower than final (was 1.5)
-            'acceleration_threshold': 1.5,    # Lower than final (was 2.0)
-            'direction_stability_frames': 1,  # Lower than final (was 2)
+            # Looser thresholds for candidate generation - even more lenient
+            'velocity_spike_threshold': 0.8,  # Reduced from 1.2 - detect subtle movements
+            'acceleration_threshold': 1.0,    # Reduced from 1.5 - detect gradual acceleration
+            'direction_stability_frames': 1,  # Keep at 1 - already lenient
             
-            # Candidate selection (looser)
-            'min_pass_distance': 2.0,         # Lower than final (was 3.0)
-            'max_pass_distance': 45.0,        # Higher than final (was 25.0)
-            'max_angle_deviation': 70.0,      # Higher than final (was 45.0)
+            # Candidate selection (even looser)
+            'min_pass_distance': 1.5,         # Reduced from 2.0 - allow shorter passes
+            'max_pass_distance': 50.0,        # Increased from 45.0 - allow longer passes
+            'max_angle_deviation': 80.0,      # Increased from 70.0 - allow wider angles
             
-            # Temporal (looser)
-            'min_pass_time': 0.2,            # Lower
-            'max_pass_time': 3.5,            # Higher
+            # Temporal (even looser)
+            'min_pass_time': 0.15,           # Reduced from 0.2 - allow faster passes
+            'max_pass_time': 4.0,            # Increased from 3.5 - allow slower passes
             
             # Confidence (lower threshold for candidates)
-            'min_candidate_confidence': 0.25,  # Much lower than final
+            'min_candidate_confidence': 0.15, # Reduced from 0.25 - generate more candidates
             
             # Frame rate
             'fps': 30.0,

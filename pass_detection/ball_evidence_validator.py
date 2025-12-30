@@ -63,34 +63,34 @@ class BallEvidenceValidator:
             config: Configuration dictionary
         """
         self.config = {
-            # Proximity thresholds (meters in pitch coordinates)
-            'initiation_proximity': 5.0,    # Ball must be within X meters of initiator
-            'reception_proximity': 5.0,     # Ball must be within X meters of receiver
+            # Proximity thresholds (meters in pitch coordinates) - more lenient
+            'initiation_proximity': 8.0,    # Increased from 5.0 - ball can be further from initiator
+            'reception_proximity': 8.0,     # Increased from 5.0 - ball can be further from receiver
             
-            # Time windows (frames)
-            'initiation_window': 8,         # ±N frames around start
-            'reception_window': 10,         # ±N frames around end
+            # Time windows (frames) - larger windows
+            'initiation_window': 15,        # Increased from 8 - look further for ball
+            'reception_window': 15,         # Increased from 10 - look further for ball
             
-            # Speed constraints (m/s)
-            'min_ball_speed': 1.0,          # Minimum speed for transit
-            'max_ball_speed': 40.0,         # Maximum speed
+            # Speed constraints (m/s) - more lenient
+            'min_ball_speed': 0.5,          # Reduced from 1.0 - allow slower passes
+            'max_ball_speed': 45.0,         # Increased from 40.0 - allow faster passes
             
-            # Direction alignment (degrees)
-            'max_direction_deviation': 75.0,  # Max angle between ball motion and pass direction
+            # Direction alignment (degrees) - more lenient
+            'max_direction_deviation': 90.0,  # Increased from 75.0 - allow more angle variation
             
-            # Evidence weights - prioritize initiation and reception
-            'initiation_weight': 0.40,
-            'transit_weight': 0.20,
-            'reception_weight': 0.40,
+            # Evidence weights - reduced weight on transit (most problematic)
+            'initiation_weight': 0.45,
+            'transit_weight': 0.10,         # Reduced from 0.20 - transit evidence less important
+            'reception_weight': 0.45,
             
-            # Minimum evidence score to accept
-            'min_evidence_score': 0.30,
+            # Minimum evidence score to accept - significantly reduced
+            'min_evidence_score': 0.20,     # Reduced from 0.30 - accept more passes
             
-            # Minimum available ball frames (DETECTED or PREDICTED)
-            'min_available_frames': 2,
+            # Minimum available ball frames (DETECTED or PREDICTED) - reduced
+            'min_available_frames': 1,      # Reduced from 2 - only need 1 frame
             
-            # Maximum LOST frames allowed in pass window
-            'max_lost_ratio': 0.6,  # If more than 60% of frames are LOST, reject
+            # Maximum LOST frames allowed in pass window - more lenient
+            'max_lost_ratio': 0.8,          # Increased from 0.6 - allow more LOST frames
             
             # Frame rate
             'fps': 30.0,

@@ -43,13 +43,13 @@ class HybridPassManager:
             config: Configuration dictionary
         """
         self.config = {
-            # Final pass thresholds (stricter than candidates)
-            'min_final_confidence': 0.5,  # Combined player + ball confidence
+            # Final pass thresholds - reduced for less strict detection
+            'min_final_confidence': 0.35,  # Reduced from 0.5 - accept more passes
             
-            # Duplicate prevention
-            'cooldown_duration': 0.75,   # seconds
-            'pair_lock_duration': 1.5,    # seconds
-            'temporal_merge_window': 15,  # frames
+            # Duplicate prevention - more lenient
+            'cooldown_duration': 0.5,    # Reduced from 0.75 - allow faster re-initiation
+            'pair_lock_duration': 1.0,   # Reduced from 1.5 - allow same pair passes sooner
+            'temporal_merge_window': 20, # Increased from 15 - merge similar passes
             
             # Team binding
             'lock_team_assignments': True,

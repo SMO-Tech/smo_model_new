@@ -7,8 +7,8 @@ sys.path.append(str(PROJECT_DIR))
 from pipelines import TrackingPipeline, ProcessingPipeline, DetectionPipeline, KeypointPipeline, TacticalPipeline
 from constants import model_path, test_video, EMBEDDING_BATCH_SIZE
 from keypoint_detection.keypoint_constants import keypoint_model_path
-from pass_detection import HybridPassManager, PassVisualizer
-from pass_detection.ball_tracker import BallState, BallObservation
+from pass_detection import PassLifecycleManager, PassVisualizer
+from pass_detection.ball_tracker import StrictBallTracker, BallState, BallObservation
 import numpy as np
 import cv2
 import time
@@ -129,25 +129,25 @@ class CompleteSoccerAnalysisPipeline:
         cap.release()
         
         # Step 4: Initialize hybrid pass detection system
-        print("\n[Step 4/8] Initializing hybrid pass detection system...")
+        print("\n[Step 4/8] Initializing pass detection system (player motion based)...")
         print("  - Player Candidate Generator (looser thresholds)")
-        print("  - Ball Evidence Validator (strict ball tracking)")
-        print("  - Hybrid Pass Manager (players propose, ball validates)")
-        print("  - Ball Tracker (DETECTED/PREDICTED/LOST states, max 5-frame prediction)")
+        print("  - Pass Lifecycle Manager (player motion events)")
+        print("  - Ball Tracker (DETECTED/PREDICTED/LOST states)")
         
         pass_config = {
             'fps': video_fps,
             'lock_team_assignments': True,
-            'min_final_confidence': 0.5,  # Combined player + ball
-            'temporal_merge_window': 15,
-            'cooldown_duration': 0.75,
-            'pair_lock_duration': 1.5,
+            'min_confidence': 0.35,
+            'temporal_merge_window': 20,
+            'cooldown_duration': 0.5,
+            'pair_lock_duration': 1.0,
         }
-        hybrid_pass_manager = HybridPassManager(pass_config)
+        pass_lifecycle_manager = PassLifecycleManager(pass_config)
         pass_visualizer = PassVisualizer({'fps': video_fps})
         
         # Reset ball frame states storage
         self.ball_frame_states = {}
+        ball_tracker = StrictBallTracker({'fps': video_fps})
         
         # Step 5: Process all frames with detections, tracking, team assignment, and pass detection
         print("\n[Step 5/8] Processing frames with complete analysis and pass detection...")
@@ -157,11 +157,12 @@ class CompleteSoccerAnalysisPipeline:
         # Store frame ball detections for visualization (before pitch transform)
         frame_ball_detections: Dict[int, sv.Detections] = {}
         
-        # Team binding: Lock team assignments per player (read from hybrid_pass_manager)
+        # Team binding: Lock team assignments per player (read from pass lifecycle manager)
         locked_team_map = {}  # player_id -> team_id (locked after first assignment)
         
         # Batch process embeddings for faster UMAP transform
-        BATCH_SIZE = 30
+        # Increased batch size for better GPU utilization on Tesla T4 (15GB VRAM)
+        BATCH_SIZE = 50
         frame_embeddings_buffer = []
         
         for i, frame in enumerate(tqdm(frames, desc="Processing frames")):
@@ -259,19 +260,20 @@ class CompleteSoccerAnalysisPipeline:
                         if p_det.tracker_id is not None:
                             player_teams = {tid: locked_team_map.get(tid, 0) for tid in p_det.tracker_id}
                         
-                        # Process frame through hybrid manager
-                        # This updates ball tracker every frame and checks for pass candidates
-                        hybrid_pass_manager.process_frame(
+                        # Update ball tracker with available detections
+                        ball_tracker.update(frame_idx, ball_pitch_positions)
+
+                        # Process frame through pass lifecycle manager
+                        pass_lifecycle_manager.process_frame(
                             frame_idx,
                             current_positions,
-                            player_teams,
-                            ball_pitch_positions  # Ball positions in pitch coordinates (None if not available)
+                            player_teams
                         )
-                        
-                        # Store ball state from tracker for visualization
+
+                        # Store ball state for visualization
                         self._store_ball_state_from_tracker(
                             frame_idx,
-                            hybrid_pass_manager.ball_tracker,
+                            ball_tracker,
                             frame_ball_detections.get(frame_idx)
                         )
                 
@@ -291,18 +293,15 @@ class CompleteSoccerAnalysisPipeline:
                                 if ball_pitch_positions is not None and len(ball_pitch_positions) > 0:
                                     ball_pitch_positions = np.array(ball_pitch_positions)
                         
-                        # Update ball tracker (no players, but ball tracking continues)
-                        hybrid_pass_manager.process_frame(
+                        ball_tracker.update(frame_idx, ball_pitch_positions)
+                        pass_lifecycle_manager.process_frame(
                             frame_idx,
-                            {},  # No player positions
-                            {},  # No team assignments
-                            ball_pitch_positions
+                            {},
+                            {}
                         )
-                        
-                        # Store ball state from tracker for visualization
                         self._store_ball_state_from_tracker(
                             frame_idx,
-                            hybrid_pass_manager.ball_tracker,
+                            ball_tracker,
                             frame_ball_detections.get(frame_idx)
                         )
                 
@@ -312,15 +311,10 @@ class CompleteSoccerAnalysisPipeline:
         # Step 6: Get confirmed passes (no debug CSVs)
         print("\n[Step 6/8] Collecting confirmed passes...")
         
-        # Get all confirmed passes (hybrid-validated)
-        all_passes = hybrid_pass_manager.get_confirmed_passes()
-        ball_tracker = hybrid_pass_manager.get_ball_tracker()
+        # Get all confirmed passes (player-based)
+        all_passes = pass_lifecycle_manager.get_confirmed_passes()
         
         print(f"  - Total confirmed passes: {len(all_passes)}")
-        
-        # Save debug outputs for rejected passes
-        debug_dir = Path(video_path).parent / "pass_detection_debug"
-        self._save_debug_outputs(hybrid_pass_manager, debug_dir)
         
         # Step 7: Annotate frames with passes
         print("\n[Step 7/8] Annotating frames with detections and passes...")
@@ -363,7 +357,7 @@ class CompleteSoccerAnalysisPipeline:
         
         # Summary
         total_time = time.time() - total_start_time
-        metrics = hybrid_pass_manager.metrics
+        metrics = pass_lifecycle_manager.metrics
         ball_stats = ball_tracker.get_stats()
         
         # Count ball states from stored frame states
@@ -385,17 +379,16 @@ class CompleteSoccerAnalysisPipeline:
         print(f"  - Rejected (jump): {ball_stats.get('rejected_jump', 0)}")
         print(f"  - Rejected (jitter): {ball_stats.get('rejected_jitter', 0)}")
         
-        print(f"\nHybrid Pass Detection Metrics:")
-        print(f"  - Player candidates generated: {metrics['player_candidates_generated']}")
-        print(f"  - Ball validated passes: {metrics['ball_validated_passes']}")
-        print(f"  - Rejected (no ball evidence): {metrics['rejected_no_ball_evidence']}")
-        print(f"  - Rejected (contradictory ball): {metrics['rejected_contradictory_ball']}")
-        print(f"  - Rejected (duplicate): {metrics['rejected_duplicate']}")
-        print(f"  - Rejected (cooldown): {metrics['rejected_cooldown']}")
-        print(f"  - Rejected (low confidence): {metrics['rejected_low_confidence']}")
+        print(f"\nPlayer-based Pass Detection Metrics:")
+        print(f"  - Initiations detected: {metrics.get('total_initiations', 0)}")
+        print(f"  - Confirmed passes: {metrics.get('accepted_passes', 0)}")
+        print(f"  - Rejected passes: {metrics.get('rejected_passes', 0)}")
+        print(f"  - Duplicate prevention triggers: {metrics.get('duplicates_prevented', 0)}")
+        print(f"  - Cooldown rejections: {metrics.get('cooldown_rejections', 0)}")
+        print(f"  - Pair lock rejections: {metrics.get('pair_lock_rejections', 0)}")
+        print(f"  - Temporal merges: {metrics.get('temporal_merges', 0)}")
         print(f"\nOutput video: {output_path}")
         print(f"Passes CSV: {csv_output_path}")
-        print(f"Debug outputs: {debug_dir}")
         
         return output_path
     
@@ -548,58 +541,6 @@ class CompleteSoccerAnalysisPipeline:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         
         return annotated
-    
-    def _save_debug_outputs(self, hybrid_pass_manager: HybridPassManager, output_dir: Path):
-        """
-        Save debug outputs for pass detection analysis.
-        
-        Args:
-            hybrid_pass_manager: The HybridPassManager instance
-            output_dir: Directory to save debug outputs
-        """
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save rejected candidates
-        rejected = hybrid_pass_manager.rejected_candidates
-        if rejected:
-            df = pd.DataFrame(rejected)
-            df.to_csv(output_dir / "rejected_passes.csv", index=False)
-            print(f"  - Saved {len(rejected)} rejected candidates to {output_dir / 'rejected_passes.csv'}")
-        
-        # Save player candidates
-        candidates = hybrid_pass_manager.player_candidates
-        if candidates:
-            candidates_data = [{
-                'candidate_id': c.candidate_id,
-                'initiator_id': c.initiator_id,
-                'receiver_id': c.receiver_id,
-                'team_id': c.team_id,
-                'start_frame': c.start_frame_estimate,
-                'end_frame': c.end_frame_estimate,
-                'player_confidence': c.confidence_player,
-                'distance_meters': c.distance_meters,
-                'validated': c.validated,
-                'ball_evidence_score': c.ball_evidence_score,
-                'rejection_reason': c.rejection_reason
-            } for c in candidates]
-            df = pd.DataFrame(candidates_data)
-            df.to_csv(output_dir / "player_candidates.csv", index=False)
-        
-        # Save ball validations
-        validations = hybrid_pass_manager.ball_validations
-        if validations:
-            df = pd.DataFrame(validations)
-            df.to_csv(output_dir / "ball_validations.csv", index=False)
-        
-        # Save ball tracker stats
-        ball_stats = hybrid_pass_manager.ball_tracker.get_stats()
-        stats_df = pd.DataFrame([ball_stats])
-        stats_df.to_csv(output_dir / "ball_tracker_stats.csv", index=False)
-        
-        # Save metrics
-        metrics = hybrid_pass_manager.metrics
-        metrics_df = pd.DataFrame([metrics])
-        metrics_df.to_csv(output_dir / "pass_detection_metrics.csv", index=False)
     
     def _export_passes_to_csv(self, passes: List, csv_path: str, fps: float, 
                               team_map: dict = None):
