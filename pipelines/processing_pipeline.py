@@ -10,8 +10,7 @@ from utils import read_video, write_video
 
 class ProcessingPipeline:
     """
-    Pipeline for video processing utilities like reading and writing.
-    Ball interpolation has been removed.
+    Pipeline for video processing utilities like reading, writing, and ball interpolation.
     """
     
     def __init__(self):
@@ -45,6 +44,48 @@ class ProcessingPipeline:
         """
         print(f"Writing video to {output_path}...")
         write_video(frames, output_path, fps=fps)
+    
+    @staticmethod
+    def interpolate_ball_tracks(tracks):
+        """
+        Interpolate ball tracks to fill in missing detections with improved smoothing.
+        
+        Args:
+            tracks: Dictionary containing tracking data
+            
+        Returns:
+            Updated tracks with interpolated ball positions
+        """
+        print("Interpolating ball tracks...")
+        
+        # Get ball tracks
+        ball_tracks = tracks['ball']
+        
+        # Convert to DataFrame for interpolation
+        df = pd.DataFrame.from_dict(ball_tracks, orient='index')
+        df.columns = ['x1', 'y1', 'x2', 'y2']
+        
+        # Replace None values with NaN for proper interpolation
+        df = df.replace([None], np.nan)
+        
+        # Perform linear interpolation with smaller gap limit for smoother tracking
+        df = df.interpolate(method='linear', limit_direction='both', limit=20)
+        
+        # Apply simple moving average smoothing to reduce jitter (window=3)
+        for col in df.columns:
+            df[col] = df[col].rolling(window=3, center=True, min_periods=1).mean()
+        
+        # Fill any remaining NaN values
+        df = df.bfill().ffill()
+        
+        # Convert back to dictionary format
+        new_tracks = {}
+        for i, box in enumerate(df.to_numpy()):
+            new_tracks[i] = box.tolist()
+        
+        # Update original tracks
+        tracks['ball'] = new_tracks
+        return tracks
     
     @staticmethod
     def generate_output_path(input_path, suffix="_tracked"):

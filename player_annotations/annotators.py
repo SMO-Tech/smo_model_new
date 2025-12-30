@@ -153,16 +153,31 @@ class AnnotatorManager:
             return self.ellipse_annotator.annotate(frame, referee_detections)
         return frame
 
+    def annotate_ball(self, frame: np.ndarray, ball_detections: sv.Detections) -> np.ndarray:
+        """
+        Annotate ball detections on frame using triangle (pointing upward).
+
+        Args:
+            frame: Input video frame
+            ball_detections: Ball detection results
+
+        Returns:
+            Annotated frame with ball triangle annotations
+        """
+        if ball_detections is None or len(ball_detections.xyxy) == 0:
+            return frame
+        
+        # Use triangle annotator for ball (triangle pointing upward)
+        return self.triangle_annotator.annotate(frame, ball_detections)
+
     def annotate_all(self, frame: np.ndarray, player_detections, ball_detections, referee_detections) -> np.ndarray:
         """
-        Annotate players and referees on the frame using separate methods.
-        
-        Note: Ball detection has been removed. ball_detections parameter is ignored.
+        Annotate players, ball, and referees on the frame.
 
         Args:
             frame: Input video frame
             player_detections: Player detection results
-            ball_detections: Ignored (kept for compatibility)
+            ball_detections: Ball detection results (drawn as triangle)
             referee_detections: Referee detection results
 
         Returns:
@@ -170,8 +185,9 @@ class AnnotatorManager:
         """
         target_frame = frame.copy()
 
-        # Annotate each type separately (ball annotation removed)
+        # Annotate each type separately
         target_frame = self.annotate_players(target_frame, player_detections)
+        target_frame = self.annotate_ball(target_frame, ball_detections)
         target_frame = self.annotate_referees(target_frame, referee_detections)
 
         return target_frame
@@ -261,17 +277,15 @@ class AnnotatorManager:
     def convert_tracks_to_detections(self, player_tracks, ball_tracks, referee_tracks, player_classids=None):
         """
         Convert tracking data back to supervision detections format.
-        
-        Note: ball_tracks parameter is ignored (ball tracking removed).
 
         Args:
             player_tracks: Player tracking data for a frame
-            ball_tracks: Ignored (kept for compatibility)
+            ball_tracks: Ball tracking data for a frame [x1, y1, x2, y2] or None
             referee_tracks: Referee tracking data for a frame
             player_classids: Player class ID data for a frame (optional)
 
         Returns:
-            Tuple of converted detection objects (player_detections, None, referee_detections)
+            Tuple of converted detection objects (player_detections, ball_detections, referee_detections)
         """
         # Get the player detections
         if player_tracks is not None:
@@ -290,8 +304,16 @@ class AnnotatorManager:
         else:
             player_detections = None
 
-        # Ball detections always None (ball tracking removed)
-        ball_detections = None
+        # Convert ball tracks to detections
+        if ball_tracks is not None and len(ball_tracks) == 4 and ball_tracks[0] is not None:
+            # ball_tracks is [x1, y1, x2, y2]
+            ball_detections = sv.Detections(
+                xyxy=np.array([[ball_tracks[0], ball_tracks[1], ball_tracks[2], ball_tracks[3]]]),
+                class_id=np.array([1]),  # Ball class ID
+                confidence=np.array([1.0])  # Default confidence
+            )
+        else:
+            ball_detections = None
 
         # Get the referee detections
         if referee_tracks is not None:

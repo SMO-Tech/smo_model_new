@@ -40,6 +40,7 @@ class TrackingPipeline:
         self.detection_pipeline = DetectionPipeline(model_path)
         self.processing_pipeline = ProcessingPipeline()
         self.tracker_manager = None
+        self.ball_tracker_manager = None  # Separate tracker for ball
         self.clustering_manager = None
         self.annotator_manager = None
         
@@ -55,6 +56,10 @@ class TrackingPipeline:
         # Initialize tracker for players
         print("Initializing player tracker...")
         self.tracker_manager = TrackerManager()
+        
+        # Initialize separate tracker for ball (with higher match threshold for consistency)
+        print("Initializing ball tracker...")
+        self.ball_tracker_manager = TrackerManager(match_thresh=0.6, track_buffer=60)
         
         # Initialize clustering manager
         print("Initializing clustering manager...")
@@ -136,13 +141,13 @@ class TrackingPipeline:
             frame: Input video frame
             
         Returns:
-            Tuple of detection results (player, referee)
+            Tuple of detection results (player, ball, referee)
         """
         detection_time = time.time()
-        player_detections, _, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
+        player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
         detection_time = time.time() - detection_time
         
-        return player_detections, referee_detections, detection_time
+        return player_detections, ball_detections, referee_detections, detection_time
     
     def tracking_callback(self, player_detections):
         """
@@ -155,6 +160,37 @@ class TrackingPipeline:
             Updated player detections with tracking information
         """
         return self.tracker_manager.process_tracking_for_frame(player_detections)
+    
+    def ball_tracking_callback(self, ball_detections):
+        """
+        Tracking callback for updating ball tracks using ByteTrack.
+        This ensures consistent ball tracking across frames.
+        
+        Args:
+            ball_detections: Ball detection results
+            
+        Returns:
+            Updated ball detections with tracking IDs (filtered to best detection)
+        """
+        if ball_detections is None or len(ball_detections.xyxy) == 0:
+            return ball_detections
+        
+        # Track ball with ByteTrack
+        tracked_ball = self.ball_tracker_manager.update_player_detections(ball_detections)
+        
+        # If multiple detections, choose the one with the longest track (most consistent)
+        if len(tracked_ball.xyxy) > 1 and tracked_ball.tracker_id is not None:
+            # Filter to only active tracks (confidence > 0.5 if available)
+            if hasattr(tracked_ball, 'confidence') and tracked_ball.confidence is not None:
+                high_conf_mask = tracked_ball.confidence > 0.5
+                if high_conf_mask.any():
+                    tracked_ball = tracked_ball[high_conf_mask]
+            
+            # If still multiple, take the first one (ByteTrack already filtered by consistency)
+            if len(tracked_ball.xyxy) > 1:
+                tracked_ball = tracked_ball[0:1]
+        
+        return tracked_ball
     
     def clustering_callback(self, frame, player_detections):
         """
@@ -175,12 +211,13 @@ class TrackingPipeline:
 
         return player_detections, assignment_time
 
-    def convert_detection_to_tracks(self, player_detections, referee_detections, tracks, index):
+    def convert_detection_to_tracks(self, player_detections, ball_detections, referee_detections, tracks, index):
         """
         Convert detection results to track format for storage.
         
         Args:
             player_detections: Player detection results from YOLO
+            ball_detections: Ball detection results from YOLO
             referee_detections: Referee detection results from YOLO
             tracks: Existing tracks dictionary to update
             index: Frame index for track storage
@@ -202,6 +239,13 @@ class TrackingPipeline:
         else:
             tracks['player'][index] = {-1: [None]*4}
             tracks['player_classids'][index] = {-1: None}
+        
+        # Store ball tracks (single detection per frame)
+        if len(ball_detections.xyxy) > 0:
+            for bbox in ball_detections.xyxy:
+                tracks['ball'][index] = [bbox[0], bbox[1], bbox[2], bbox[3]]
+        else:
+            tracks['ball'][index] = [None]*4
         
         # Store referee tracks with sequential IDs
         if len(referee_detections.xyxy) > 0:
@@ -235,13 +279,14 @@ class TrackingPipeline:
         print("Processing frames and extracting tracks...")
         tracks = {
             'player': {},
+            'ball': {},
             'referee': {},
             'player_classids': {},
         }
         
         for index, frame in tqdm(enumerate(frames), total=len(frames)):
             # Detection pipeline - detect objects in frame
-            player_detections, referee_detections, det_time = self.detection_callback(frame)
+            player_detections, ball_detections, referee_detections, det_time = self.detection_callback(frame)
             
             # Tracking pipeline - update player tracking with ByteTrack
             player_detections = self.tracking_callback(player_detections)
@@ -251,7 +296,7 @@ class TrackingPipeline:
                 player_detections, _ = self.clustering_callback(frame, player_detections)
             
             # Convert detections to structured track format
-            tracks = self.convert_detection_to_tracks(player_detections, referee_detections, tracks, index)
+            tracks = self.convert_detection_to_tracks(player_detections, ball_detections, referee_detections, tracks, index)
         
         return tracks
     
@@ -272,6 +317,7 @@ class TrackingPipeline:
         for index, frame in tqdm(enumerate(frames), total=len(frames)):
             # Get tracks for this frame
             player_tracks = tracks['player'][index]
+            ball_tracks = tracks['ball'][index]
             referee_tracks = tracks['referee'][index]
             player_classids = tracks.get('player_classids', {}).get(index, None)
             
@@ -281,15 +327,17 @@ class TrackingPipeline:
                 player_classids = None
             if -1 in referee_tracks:
                 referee_tracks = None
+            if (not all(ball_tracks)) or np.isnan(ball_tracks).all():
+                ball_tracks = None
             
             # Convert to detections with stored class IDs
             player_detections, ball_detections, referee_detections = self.annotator_manager.convert_tracks_to_detections(
-                player_tracks, None, referee_tracks, player_classids
+                player_tracks, ball_tracks, referee_tracks, player_classids
             )
             
             # Annotate frame
             annotated_frame = self.annotator_manager.annotate_all(
-                frame, player_detections, None, referee_detections
+                frame, player_detections, ball_detections, referee_detections
             )
             annotated_frames.append(annotated_frame)
         
@@ -315,6 +363,9 @@ class TrackingPipeline:
         
         print("Extracting tracks from video...")
         tracks = self.get_tracks(frames)
+        
+        print("Interpolating ball tracks...")
+        tracks = self.processing_pipeline.interpolate_ball_tracks(tracks)
         
         print("Annotating frames with tracking results...")
         annotated_frames = self.annotate_frames(frames, tracks)
@@ -358,7 +409,7 @@ class TrackingPipeline:
             frame_count += 1
             
             # Detection
-            player_detections, referee_detections, det_time = self.detection_callback(frame)
+            player_detections, ball_detections, referee_detections, det_time = self.detection_callback(frame)
             
             # Tracking
             player_detections = self.tracking_callback(player_detections)
@@ -369,7 +420,7 @@ class TrackingPipeline:
             
             # Annotate frame
             annotated_frame = self.annotator_manager.annotate_all(
-                frame, player_detections, None, referee_detections
+                frame, player_detections, ball_detections, referee_detections
             )
             
             # Add metadata overlay if requested
@@ -379,6 +430,9 @@ class TrackingPipeline:
                           (10, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 text_y += 30
                 cv2.putText(annotated_frame, f"Players: {len(player_detections.xyxy) if player_detections is not None else 0}", 
+                          (10, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                text_y += 30
+                cv2.putText(annotated_frame, f"Ball: {len(ball_detections.xyxy) if ball_detections is not None else 0}", 
                           (10, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 text_y += 30
                 cv2.putText(annotated_frame, f"Referees: {len(referee_detections.xyxy) if referee_detections is not None else 0}", 

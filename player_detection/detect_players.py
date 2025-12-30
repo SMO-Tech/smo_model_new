@@ -1,8 +1,7 @@
 """Core Player Detection Functions for Soccer Analysis.
 
-This module provides core functionality for detecting players and referees
-using YOLO models. Ball detection has been removed.
-Pipeline functions have been moved to detection_pipeline.py.
+This module provides core functionality for detecting players, ball, and referees
+using YOLO models. Pipeline functions have been moved to detection_pipeline.py.
 """
 
 import sys
@@ -126,7 +125,6 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
         detections = inference_callback(frame)
 
     # Separate detections by class
-    # Class 0 = Players, Class 1 = Ball, Class 2 = Referees
     player_detections = detections[detections.class_id == 0]
     ball_detections = detections[detections.class_id == 1]
     referee_detections = detections[detections.class_id == 2]
