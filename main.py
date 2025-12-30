@@ -9,6 +9,7 @@ from constants import model_path, test_video, EMBEDDING_BATCH_SIZE
 from keypoint_detection.keypoint_constants import keypoint_model_path
 from pass_detection import PassLifecycleManager, PassVisualizer
 from pass_detection.ball_tracker import StrictBallTracker, BallState, BallObservation
+from calibration.pitch_calibration import PitchCalibration
 import numpy as np
 import cv2
 import time
@@ -148,6 +149,8 @@ class CompleteSoccerAnalysisPipeline:
         # Reset ball frame states storage
         self.ball_frame_states = {}
         ball_tracker = StrictBallTracker({'fps': video_fps})
+        pitch_calibration = PitchCalibration()
+        pitch_debug_rows = []
         
         # Step 5: Process all frames with detections, tracking, team assignment, and pass detection
         print("\n[Step 5/8] Processing frames with complete analysis and pass detection...")
@@ -170,12 +173,55 @@ class CompleteSoccerAnalysisPipeline:
             # Detect keypoints and objects (including ball)
             keypoints, _ = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
             player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
+            pitch_calibration.try_calibrate(keypoints)
             
             # Store ball frame detection for visualization (in frame coordinates)
             frame_ball_detections[i] = ball_detections
             
             # Update with tracking (players only, no ball)
             player_detections = self.tracking_pipeline.tracking_callback(player_detections)
+
+            # Record pitch coordinates for players
+            player_pitch_coords = []
+            if pitch_calibration.enabled and len(player_detections.xyxy) > 0:
+                tracker_ids = player_detections.tracker_id or []
+                for idx, bbox in enumerate(player_detections.xyxy):
+                    center_x = (bbox[0] + bbox[2]) / 2
+                    center_y = (bbox[1] + bbox[3]) / 2
+                    pitch_coord = pitch_calibration.pixel_to_pitch(center_x, center_y)
+                    player_pitch_coords.append(pitch_coord)
+
+                    if pitch_coord is not None:
+                        track_id = tracker_ids[idx] if idx < len(tracker_ids) and tracker_ids[idx] is not None else -1
+                        pitch_debug_rows.append({
+                            'frame_id': i,
+                            'entity_type': 'player',
+                            'track_id': track_id,
+                            'pixel_x': float(center_x),
+                            'pixel_y': float(center_y),
+                            'pitch_x': pitch_coord[0],
+                            'pitch_y': pitch_coord[1],
+                        })
+            player_detections.pitch_xy = player_pitch_coords
+
+            # Record pitch coordinates for the ball
+            ball_pitch_coord = None
+            if pitch_calibration.enabled and len(ball_detections.xyxy) > 0:
+                bbox = ball_detections.xyxy[0]
+                center_x = (bbox[0] + bbox[2]) / 2
+                center_y = (bbox[1] + bbox[3]) / 2
+                ball_pitch_coord = pitch_calibration.pixel_to_pitch(center_x, center_y)
+                if ball_pitch_coord is not None:
+                    pitch_debug_rows.append({
+                        'frame_id': i,
+                        'entity_type': 'ball',
+                        'track_id': -1,
+                        'pixel_x': float(center_x),
+                        'pixel_y': float(center_y),
+                        'pitch_x': ball_pitch_coord[0],
+                        'pitch_y': ball_pitch_coord[1],
+                    })
+            ball_detections.pitch_xy = ball_pitch_coord
 
             # Extract crops for team assignment (but batch process UMAP for 23x speedup)
             if len(player_detections.xyxy) > 0:
@@ -354,6 +400,7 @@ class CompleteSoccerAnalysisPipeline:
         # Export passes to single CSV file with required columns
         csv_output_path = Path(video_path).parent / "passes.csv"
         self._export_passes_to_csv(all_passes, str(csv_output_path), video_fps, locked_team_map)
+        self._write_pitch_debug_csv(pitch_debug_rows, video_path)
         
         # Summary
         total_time = time.time() - total_start_time
@@ -598,6 +645,19 @@ class CompleteSoccerAnalysisPipeline:
             df = pd.DataFrame(columns=required_columns)
             df.to_csv(csv_path, index=False)
             print(f"⚠️  No passes detected. Created CSV with headers at {csv_path}")
+
+    def _write_pitch_debug_csv(self, rows: List[dict], video_path: str):
+        """Write debug CSV with pixel → pitch coordinates."""
+        if not rows:
+            return
+
+        output_dir = Path(video_path).parent / "debug"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        df = pd.DataFrame(rows)
+        debug_path = output_dir / "pitch_coordinates.csv"
+        df.to_csv(debug_path, index=False)
+        print(f"✅ Exported {len(rows)} pitch coordinate entries to {debug_path}")
 
 
 
