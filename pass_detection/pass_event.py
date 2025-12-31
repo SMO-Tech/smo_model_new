@@ -33,13 +33,12 @@ class PassEvent:
     
     # Initiator info (set at creation, NEVER modified)
     from_player_id: int = 0
-    team_id: int = 0  # Initiator's team ID
+    team_id: int = 0
     start_frame: int = 0  # The EARLIEST detected initiation frame
     start_position: List[float] = field(default_factory=list)
     
     # Receiver info (set when confirmed)
     to_player_id: Optional[int] = None
-    receiver_team_id: Optional[int] = None  # Receiver's team ID (may differ for interceptions)
     end_frame: Optional[int] = None  # Frame where reception confirmed
     end_position: Optional[List[float]] = None
     

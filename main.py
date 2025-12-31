@@ -6,13 +6,10 @@ sys.path.append(str(PROJECT_DIR))
 from pipelines import TrackingPipeline, ProcessingPipeline, DetectionPipeline, KeypointPipeline, TacticalPipeline
 from constants import model_path, test_video, EMBEDDING_BATCH_SIZE
 from keypoint_detection.keypoint_constants import keypoint_model_path
-from pass_detection.simple_pass_detector import SimplePassDetector
 import numpy as np
 import time
 from tqdm import tqdm
 import supervision as sv
-import cv2
-import csv
 
 
 class CompleteSoccerAnalysisPipeline:
@@ -30,8 +27,6 @@ class CompleteSoccerAnalysisPipeline:
         self.tracking_pipeline = TrackingPipeline(detection_model_path)
         self.tactical_pipeline = TacticalPipeline(keypoint_model_path, detection_model_path)
         self.processing_pipeline = ProcessingPipeline()
-        self.pass_detector = None  # Will be initialized with video FPS
-        self.video_fps = 30.0  # Default, will be updated from video
         
     def initialize_models(self):
         """Initialize all models required for complete analysis."""
@@ -79,20 +74,10 @@ class CompleteSoccerAnalysisPipeline:
         print("\n[Step 2/8] Training team assignment models...")
         self.tracking_pipeline.train_team_assignment_models(video_path)
         
-        # Step 3: Read video frames and get FPS
+        # Step 3: Read video frames
         print("\n[Step 3/8] Reading video frames...")
         frames = self.processing_pipeline.read_video_frames(video_path, frame_count)
         print(f"Loaded {len(frames)} frames for processing")
-        
-        # Get video FPS
-        cap = cv2.VideoCapture(video_path)
-        self.video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        cap.release()
-        print(f"Video FPS: {self.video_fps:.2f}")
-        
-        # Initialize pass detector with video FPS
-        pass_config = {'fps': self.video_fps}
-        self.pass_detector = SimplePassDetector(pass_config)
         
         # Step 4: Process all frames with detections, tracking, and tactical analysis
         print("\n[Step 4/8] Processing frames with complete analysis...")
@@ -149,9 +134,6 @@ class CompleteSoccerAnalysisPipeline:
                         p_det.class_id = frame_labels
                         label_idx += num_players
                         
-                        # Process pass detection for this frame
-                        self._process_pass_detection(frame_idx, p_det, b_det)
-                        
                         # Store tracks for interpolation
                         all_tracks = self.tracking_pipeline.convert_detection_to_tracks(p_det, b_det, r_det, all_tracks, frame_idx)
                         
@@ -162,9 +144,6 @@ class CompleteSoccerAnalysisPipeline:
                 # Process frames without players
                 for frame_idx, crops, p_det, b_det, r_det, kp, orig_frame in frame_embeddings_buffer:
                     if len(crops) == 0:  # No players in this frame
-                        # Process pass detection (even with no players, ball might be present)
-                        self._process_pass_detection(frame_idx, p_det, b_det)
-                        
                         all_tracks = self.tracking_pipeline.convert_detection_to_tracks(p_det, b_det, r_det, all_tracks, frame_idx)
                         tactical_frame, _ = self.tactical_pipeline.process_detections_for_tactical_analysis(p_det, r_det, kp)
                         tactical_frames.append(tactical_frame)
@@ -187,26 +166,7 @@ class CompleteSoccerAnalysisPipeline:
         # Step 8: Write final output video
         print("\n[Step 8/8] Writing complete analysis video...")
         output_path = self.processing_pipeline.generate_output_path(video_path, output_suffix)
-        self.processing_pipeline.write_video_output(output_frames, output_path, fps=self.video_fps)
-        
-        # Step 9: Analyze pass gaps and detect missing passes
-        if self.pass_detector:
-            print("\n[Step 9/10] Analyzing pass gaps...")
-            passes = self.pass_detector.get_confirmed_passes()
-            gaps = self._analyze_pass_gaps(passes, self.video_fps, max_gap_seconds=8)
-            if gaps:
-                print(f"⚠️  Found {len(gaps)} suspicious gaps (>8 seconds)")
-                for gap in gaps:
-                    print(f"   Gap: {gap['gap_seconds']:.1f}s from {gap['start_time']:.1f}s to {gap['end_time']:.1f}s")
-            else:
-                print("✓ No suspicious gaps found")
-        
-        # Step 10: Export passes to CSV
-        if self.pass_detector:
-            print("\n[Step 10/10] Exporting passes to CSV...")
-            passes = self.pass_detector.get_confirmed_passes()
-            csv_path = self._export_passes_to_csv(passes, video_path, output_suffix)
-            print(f"Exported {len(passes)} passes to: {csv_path}")
+        self.processing_pipeline.write_video_output(output_frames, output_path)
         
         # Summary
         total_time = time.time() - total_start_time
@@ -215,188 +175,8 @@ class CompleteSoccerAnalysisPipeline:
         print(f"Frames processed: {len(frames)}")
         print(f"Average time per frame: {total_time/len(frames):.3f}s")
         print(f"Output saved to: {output_path}")
-        if self.pass_detector:
-            print(f"Passes detected: {len(passes)}")
         
         return output_path
-    
-    def _process_pass_detection(self, frame_idx: int, player_detections: sv.Detections, ball_detections: sv.Detections):
-        """
-        Process pass detection for a single frame.
-        
-        Args:
-            frame_idx: Current frame index
-            player_detections: Player detections with tracker IDs and team IDs (class_id)
-            ball_detections: Ball detections
-        """
-        if self.pass_detector is None:
-            return
-        
-        # Extract player positions (bbox centers) and team IDs
-        player_positions = {}
-        player_teams = {}
-        
-        if player_detections is not None and len(player_detections.xyxy) > 0:
-            for i in range(len(player_detections.xyxy)):
-                bbox = player_detections.xyxy[i]
-                tracker_id = int(player_detections.tracker_id[i]) if player_detections.tracker_id is not None else i
-                team_id = int(player_detections.class_id[i]) if player_detections.class_id is not None else 0
-                
-                # Calculate center of bbox (pixel coordinates)
-                center_x = (bbox[0] + bbox[2]) / 2.0
-                center_y = (bbox[1] + bbox[3]) / 2.0
-                
-                player_positions[tracker_id] = np.array([center_x, center_y], dtype=np.float32)
-                player_teams[tracker_id] = team_id
-        
-        # Extract ball position (bbox center) if available
-        ball_pos = None
-        if ball_detections is not None and len(ball_detections.xyxy) > 0:
-            # Use first ball detection (or closest to prediction if multiple)
-            bbox = ball_detections.xyxy[0]
-            center_x = (bbox[0] + bbox[2]) / 2.0
-            center_y = (bbox[1] + bbox[3]) / 2.0
-            ball_pos = np.array([[center_x, center_y]], dtype=np.float32)
-        
-        # Process frame through pass detector
-        self.pass_detector.process_frame(
-            frame=frame_idx,
-            player_positions=player_positions,
-            player_teams=player_teams,
-            ball_detections=ball_pos
-        )
-    
-    def _export_passes_to_csv(self, passes, video_path: str, suffix: str = "_complete_analysis"):
-        """
-        Export passes to CSV file with time, player IDs, and team colors.
-        
-        Args:
-            passes: List of PassEvent objects
-            video_path: Path to input video (for generating output path)
-            suffix: Suffix for output filename
-            
-        Returns:
-            Path to CSV file
-        """
-        # Generate CSV path
-        csv_path = video_path.replace(".mp4", f"{suffix}_passes.csv")
-        
-        # Team color mapping (0=Purple, 1=Red)
-        team_colors = {
-            0: "Purple",
-            1: "Red"
-        }
-        
-        # Write CSV
-        with open(csv_path, 'w', newline='') as csvfile:
-            fieldnames = [
-                'pass_id',
-                'time_initiated',
-                'time_received',
-                'time_initiated_seconds',
-                'time_received_seconds',
-                'initiator_player_id',
-                'receiver_player_id',
-                'initiator_team_color',
-                'receiver_team_color',
-                'initiator_team_id',
-                'receiver_team_id',
-                'duration_seconds',
-                'distance_pixels'
-            ]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            
-            for pass_event in passes:
-                if not pass_event.is_confirmed or pass_event.to_player_id is None:
-                    continue
-                
-                # Convert frame numbers to time in seconds
-                time_initiated = pass_event.start_frame / self.video_fps
-                time_received = pass_event.end_frame / self.video_fps if pass_event.end_frame else None
-                
-                # Format as video timestamp (MM:SS.mmm)
-                def format_video_timestamp(seconds):
-                    """Convert seconds to MM:SS.mmm format."""
-                    if seconds is None:
-                        return ""
-                    minutes = int(seconds // 60)
-                    secs = seconds % 60
-                    return f"{minutes:02d}:{secs:06.3f}"
-                
-                time_initiated_formatted = format_video_timestamp(time_initiated)
-                time_received_formatted = format_video_timestamp(time_received)
-                
-                # Get team IDs for initiator and receiver
-                initiator_team_id = pass_event.team_id
-                # Use actual receiver team (may differ for interceptions)
-                receiver_team_id = pass_event.receiver_team_id if pass_event.receiver_team_id is not None else initiator_team_id
-                
-                writer.writerow({
-                    'pass_id': pass_event.event_id,
-                    'time_initiated': time_initiated_formatted,
-                    'time_received': time_received_formatted,
-                    'time_initiated_seconds': f"{time_initiated:.3f}",
-                    'time_received_seconds': f"{time_received:.3f}" if time_received else "",
-                    'initiator_player_id': pass_event.from_player_id,
-                    'receiver_player_id': pass_event.to_player_id,
-                    'initiator_team_color': team_colors.get(initiator_team_id, "Unknown"),
-                    'receiver_team_color': team_colors.get(receiver_team_id, "Unknown"),
-                    'initiator_team_id': initiator_team_id,
-                    'receiver_team_id': receiver_team_id,
-                    'duration_seconds': f"{pass_event.duration_seconds:.3f}",
-                    'distance_pixels': f"{pass_event.distance_meters:.2f}"
-                })
-        
-        return csv_path
-    
-    def _analyze_pass_gaps(self, passes, fps: float, max_gap_seconds: float = 8.0):
-        """
-        Identify suspicious gaps where passes are missing.
-        
-        Args:
-            passes: List of PassEvent objects
-            fps: Video frames per second
-            max_gap_seconds: Maximum acceptable gap in seconds
-            
-        Returns:
-            List of gap dictionaries with details
-        """
-        if len(passes) < 2:
-            # Not enough passes to analyze gaps
-            if len(passes) == 0:
-                return [{'start_frame': 0, 'end_frame': None, 'gap_seconds': float('inf'), 
-                        'start_time': 0.0, 'end_time': None, 'suspicious': True}]
-            return []
-        
-        # Sort passes by start frame
-        passes_sorted = sorted(passes, key=lambda x: x.start_frame)
-        
-        gaps = []
-        for i in range(len(passes_sorted) - 1):
-            current_pass = passes_sorted[i]
-            next_pass = passes_sorted[i + 1]
-            
-            # Gap is from end of current pass to start of next pass
-            gap_start_frame = current_pass.end_frame if current_pass.end_frame else current_pass.start_frame
-            gap_end_frame = next_pass.start_frame
-            gap_frames = gap_end_frame - gap_start_frame
-            gap_seconds = gap_frames / fps
-            
-            if gap_seconds > max_gap_seconds:
-                gaps.append({
-                    'start_frame': gap_start_frame,
-                    'end_frame': gap_end_frame,
-                    'gap_frames': gap_frames,
-                    'gap_seconds': gap_seconds,
-                    'start_time': gap_start_frame / fps,
-                    'end_time': gap_end_frame / fps,
-                    'suspicious': True,
-                    'previous_pass': current_pass.event_id,
-                    'next_pass': next_pass.event_id
-                })
-        
-        return gaps
 
 
 
