@@ -71,24 +71,25 @@ class StrictBallTracker:
         """
         self.config = {
             # Prediction limits - increased for better continuity
-            'max_prediction_frames': 10,  # Increased from 5 to 10 for better continuity
+            'max_prediction_frames': 15,  # Increased from 10 to 15 for better continuity
             
-            # Motion constraints (in pitch coordinates - meters) - more lenient
-            'max_ball_speed': 40.0,       # m/s - increased from 35.0
-            'max_position_jump': 12.0,    # meters - increased from 8.0 to allow faster movement
-            'min_detection_distance': 0.3, # meters - reduced from 0.5 for better tracking
+            # Motion constraints (in PIXELS - matching pass detector) - VERY LENIENT
+            # Note: Pass detector uses pixels, so ball tracker should too
+            'max_ball_speed': 2000.0,    # pixels/s - VERY HIGH to allow fast passes (was 40 m/s)
+            'max_position_jump': 500.0,   # pixels - VERY HIGH to allow long passes (was 12 meters)
+            'min_detection_distance': 5.0, # pixels - very small threshold (was 0.3 meters)
             
-            # Anti-jitter: reject detections that oscillate - more lenient
+            # Anti-jitter: reject detections that oscillate - VERY LENIENT
             'jitter_window': 5,           # frames to check for jitter
-            'jitter_threshold': 5.0,      # meters - increased from 3.0 to reduce false rejections
+            'jitter_threshold': 200.0,    # pixels - VERY HIGH to reduce false rejections (was 5.0 meters)
             
             # Tracking
-            'min_detection_confidence': 0.2,  # Reduced from 0.3 to accept more detections
+            'min_detection_confidence': 0.1,  # Reduced from 0.2 to accept even more detections
             
             # Kalman filter parameters - adjusted for smoother tracking
-            'process_noise': 0.3,         # Reduced from 0.5 for smoother predictions
-            'measurement_noise': 0.8,     # Reduced from 1.0 for more trust in measurements
-            'initial_covariance': 8.0,    # Reduced from 10.0
+            'process_noise': 0.5,         # Increased from 0.3 for more flexibility
+            'measurement_noise': 1.0,     # Increased from 0.8 for more tolerance
+            'initial_covariance': 10.0,    # Increased from 8.0
             
             # Frame rate
             'fps': 30.0,

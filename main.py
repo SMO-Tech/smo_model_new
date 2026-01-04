@@ -193,6 +193,21 @@ class CompleteSoccerAnalysisPipeline:
         if self.pass_detector:
             print("\n[Step 9/10] Analyzing pass gaps...")
             passes = self.pass_detector.get_confirmed_passes()
+            
+            # Print pass detection metrics
+            if hasattr(self.pass_detector, 'metrics'):
+                metrics = self.pass_detector.metrics
+                print(f"\n📊 Pass Detection Metrics:")
+                print(f"   Total possessions detected: {metrics.get('total_possessions', 0)}")
+                print(f"   Passes detected: {metrics.get('passes_detected', 0)}")
+                print(f"   Rejected - distance too short: {metrics.get('passes_rejected_distance', 0)}")
+                print(f"   Rejected - cooldown: {metrics.get('passes_rejected_cooldown', 0)}")
+                print(f"   Rejected - same player: {metrics.get('passes_rejected_same_player', 0)}")
+                print(f"   Rejected - trajectory: {metrics.get('passes_rejected_trajectory', 0)}")
+                print(f"   Rejected - duration: {metrics.get('passes_rejected_duration', 0)}")
+                print(f"   Near misses (radius): {metrics.get('near_miss_radius', 0)}")
+                print(f"   Near misses (duration): {metrics.get('near_miss_duration', 0)}")
+            
             gaps = self._analyze_pass_gaps(passes, self.video_fps, max_gap_seconds=8)
             if gaps:
                 print(f"⚠️  Found {len(gaps)} suspicious gaps (>8 seconds)")

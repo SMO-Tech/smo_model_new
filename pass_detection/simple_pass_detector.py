@@ -44,16 +44,16 @@ class SimplePassDetector:
     def __init__(self, config: Optional[Dict] = None):
         """Initialize the simple pass detector."""
         self.config = {
-            # Possession thresholds - IN PIXELS (IMPROVED)
-            'possession_radius': 150.0,    # Increased from 100 to 150 (more realistic)
-            'min_pass_distance': 80.0,     # Minimum pass distance in pixels (meaningful distance)
-            'max_pass_distance': 800.0,    # Maximum pass distance in pixels
+            # Possession thresholds - IN PIXELS (MORE LENIENT FOR BETTER DETECTION)
+            'possession_radius': 200.0,    # Increased from 150 to 200 (catch more passes)
+            'min_pass_distance': 50.0,     # Reduced from 80 to 50 (allow shorter passes)
+            'max_pass_distance': 1200.0,  # Increased from 800 to 1200 (allow longer passes)
             
             # Timing - MINIMUM for one-touch pass detection
             'min_possession_frames': 1,    # Allow one-touch passes (was 5, reduced to 1)
-            'cooldown_frames': 60,         # 2 seconds between passes from same player
+            'cooldown_frames': 15,         # Reduced from 60 to 15 (0.5s instead of 2s - allow rapid passes)
             'min_pass_duration': 1,        # Allow one-touch passes (1 frame minimum, was 5)
-            'max_pass_duration_frames': 120,  # Pass can't take more than 4 seconds (120 frames at 30fps)
+            'max_pass_duration_frames': 150,  # Increased from 120 to 150 (5 seconds max)
             
             # Frame rate
             'fps': 30.0,
@@ -61,25 +61,25 @@ class SimplePassDetector:
             # Use pixel coordinates (since homography often fails)
             'use_pixel_coords': True,
             
-            # Trajectory validation (LENIENT for realistic soccer passes)
-            'validate_trajectory': True,   # Enable trajectory validation
-            'trajectory_similarity_threshold': 0.3,  # Lowered from 0.7 to 0.3 (allow ~72° deviation)
-            'max_path_ratio': 2.0,  # Increased from 1.5 to 2.0 (allow 100% extra path length)
-            'short_pass_exemption': 200.0,  # Skip validation for passes < 200px
-            'quick_pass_exemption_frames': 10,  # Use lenient validation for passes < 10 frames
+            # Trajectory validation (MORE LENIENT for realistic soccer passes)
+            'validate_trajectory': False,  # DISABLED - too strict, was rejecting valid passes
+            'trajectory_similarity_threshold': 0.2,  # Lowered from 0.3 to 0.2 (allow more deviation)
+            'max_path_ratio': 3.0,  # Increased from 2.0 to 3.0 (allow 200% extra path length)
+            'short_pass_exemption': 300.0,  # Increased from 200 to 300 (skip validation for more passes)
+            'quick_pass_exemption_frames': 15,  # Increased from 10 to 15 (more lenient for quick passes)
             
             # Interception detection
             'detect_interceptions': True,  # Enable detection of passes between different teams
             
             # Speed thresholds (for fast passes)
-            'max_speed_pixels_per_frame': 50,  # Increased from 25 to 50 for hard/fast passes
+            'max_speed_pixels_per_frame': 80,  # Increased from 50 to 80 for very fast passes
             
-            # Dynamic radius
+            # Dynamic radius (MORE LENIENT)
             'dynamic_radius_enabled': True,  # Enable dynamic possession radius
-            'base_radius': 150.0,
-            'speed_factor': 2.0,
-            'min_radius': 120.0,
-            'max_radius': 250.0,
+            'base_radius': 200.0,  # Increased from 150 to 200
+            'speed_factor': 2.5,  # Increased from 2.0 to 2.5
+            'min_radius': 150.0,  # Increased from 120 to 150
+            'max_radius': 350.0,  # Increased from 250 to 350
         }
         
         if config:
@@ -93,8 +93,9 @@ class SimplePassDetector:
         self.possession_frames: int = 0
         self.last_possession_frame: int = -1
         
-        # Pass tracking
-        self.confirmed_passes: List[PassEvent] = []
+        # Pass tracking - TWO PHASE SYSTEM
+        self.pass_candidates: List[Dict] = []  # Phase 1: Collect all candidates
+        self.confirmed_passes: List[PassEvent] = []  # Phase 2: Validated passes
         self.pass_counter: int = 0
         
         # Cooldowns
@@ -176,11 +177,28 @@ class SimplePassDetector:
         
         ball_obs = self.ball_tracker.update(frame, ball_detections)
         
-        # No ball position = no detection
-        if ball_obs.position is None or ball_obs.state == BallState.LOST:
+        # Allow DETECTED and PREDICTED states (only reject LOST)
+        # This allows pass detection even when ball is briefly occluded
+        if ball_obs.position is None:
+            return []
+        
+        # Accept both DETECTED and PREDICTED states
+        # PREDICTED is OK for up to 15 frames (ball tracker handles this)
+        # Only reject if truly LOST (no position available)
+        if ball_obs.state == BallState.LOST:
             return []
         
         ball_pos = ball_obs.position
+        
+        # Debug: Track ball detection rate
+        if not hasattr(self, '_ball_detection_stats'):
+            self._ball_detection_stats = {'detected': 0, 'predicted': 0, 'lost': 0}
+        if ball_obs.state == BallState.DETECTED:
+            self._ball_detection_stats['detected'] += 1
+        elif ball_obs.state == BallState.PREDICTED:
+            self._ball_detection_stats['predicted'] += 1
+        else:
+            self._ball_detection_stats['lost'] += 1
         
         # Store ball position for trajectory analysis
         self.ball_trajectory_buffer.append((frame, ball_pos.copy()))
@@ -284,6 +302,8 @@ class SimplePassDetector:
                         pass
                     # #endregion
                 
+                # PHASE 1: COLLECT CANDIDATES (Very lenient - no early rejection)
+                # Only check minimum possession frames, collect everything else
                 if self.possession_frames >= self.config['min_possession_frames']:
                     # Check if it's a pass (same team, not same player)
                     same_team = (self.current_possession.team_id == team_id)
@@ -292,104 +312,31 @@ class SimplePassDetector:
                     detect_interceptions = self.config.get('detect_interceptions', True)
                     is_valid_pass_type = same_team or detect_interceptions
                     
-                    if is_valid_pass_type:
-                        # Validate trajectory if enabled
-                        trajectory_valid = True
-                        if self.config.get('validate_trajectory', True):
-                            trajectory_valid = self._validate_pass_trajectory(
-                                self.current_possession.position,
-                                player_positions[closest_player].copy(),
+                    if is_valid_pass_type and self.current_possession.player_id != closest_player:
+                        # PHASE 1: Collect candidate (NO validation yet)
+                        candidate = {
+                            'from_player': self.current_possession.player_id,
+                            'to_player': closest_player,
+                            'from_team': self.current_possession.team_id,
+                            'to_team': team_id,
+                            'start_frame': self.current_possession.start_frame,
+                            'end_frame': frame,
+                            'from_pos': self.current_possession.position.copy(),
+                            'to_pos': player_positions[closest_player].copy(),
+                            'possession_frames': self.possession_frames,
+                            'ball_trajectory': self._extract_ball_trajectory(
                                 self.current_possession.start_frame,
                                 frame
                             )
-                            
-                            if not trajectory_valid:
-                                self.metrics['passes_rejected_trajectory'] += 1
-                                # #region agent log - TRAJECTORY REJECTED
-                                try:
-                                    with open(self.debug_log_path, 'a') as f:
-                                        f.write(json.dumps({
-                                            'hypothesisId': 'C',
-                                            'location': 'simple_pass_detector:trajectory_validation',
-                                            'message': 'pass_rejected_trajectory',
-                                            'data': {
-                                                'frame': int(frame),
-                                                'from_player': int(self.current_possession.player_id),
-                                                'to_player': int(closest_player),
-                                                'start_frame': int(self.current_possession.start_frame),
-                                                'end_frame': int(frame)
-                                            },
-                                            'timestamp': int(time.time() * 1000),
-                                            'sessionId': 'pass-detection-improvement'
-                                        }) + '\n')
-                                except:
-                                    pass
-                                # #endregion
+                        }
                         
-                        # Use pass even if trajectory invalid but distance is reasonable (fallback)
-                        if trajectory_valid or not self.config.get('validate_trajectory', True):
-                            pass_event = self._create_pass(
-                                from_player=self.current_possession.player_id,
-                                to_player=closest_player,
-                                team_id=self.current_possession.team_id,
-                                start_frame=self.current_possession.start_frame,
-                                end_frame=frame,
-                                from_pos=self.current_possession.position,
-                                to_pos=player_positions[closest_player].copy(),
-                                receiver_team_id=team_id  # Store actual receiver team
-                            )
-                            
-                            if pass_event is not None:
-                                self.confirmed_passes.append(pass_event)
-                                new_passes.append(pass_event)
-                                self.metrics['passes_detected'] += 1
-                                # #region agent log - PASS DETECTED
-                                try:
-                                    # Get frame snapshots for start and end frames
-                                    start_snapshot = self.frame_snapshots.get(self.current_possession.start_frame, {})
-                                    end_snapshot = self.frame_snapshots.get(frame, {})
-                                    
-                                    with open(self.debug_log_path, 'a') as f:
-                                        f.write(json.dumps({
-                                            'hypothesisId': 'D',
-                                            'location': 'simple_pass_detector:pass_detected',
-                                            'message': 'pass_detected',
-                                            'data': {
-                                                'frame': int(frame),
-                                                'from_player_tracker_id': int(pass_event.from_player_id),
-                                                'to_player_tracker_id': int(pass_event.to_player_id),
-                                                'distance': float(pass_event.distance_meters),
-                                                'duration_frames': int(pass_event.end_frame - pass_event.start_frame),
-                                                'duration_seconds': float(pass_event.duration_seconds),
-                                                'trajectory_valid': bool(trajectory_valid),
-                                                'start_frame_snapshot': {
-                                                    'all_tracker_ids': start_snapshot.get('all_tracker_ids', []),
-                                                    'passer_team': start_snapshot.get('player_teams', {}).get(pass_event.from_player_id, None),
-                                                    'all_teams_in_frame': {str(k): int(v) for k, v in start_snapshot.get('player_teams', {}).items()}
-                                                },
-                                                'end_frame_snapshot': {
-                                                    'all_tracker_ids': end_snapshot.get('all_tracker_ids', []),
-                                                    'receiver_team': end_snapshot.get('player_teams', {}).get(pass_event.to_player_id, None),
-                                                    'all_teams_in_frame': {str(k): int(v) for k, v in end_snapshot.get('player_teams', {}).items()}
-                                                }
-                                            },
-                                            'timestamp': int(time.time() * 1000),
-                                            'sessionId': 'pass-detection-improvement'
-                                        }) + '\n')
-                                except Exception as e:
-                                    # Log error but don't fail
-                                    try:
-                                        with open(self.debug_log_path, 'a') as f:
-                                            f.write(json.dumps({
-                                                'location': 'simple_pass_detector:pass_detected',
-                                                'message': 'pass_detected_log_error',
-                                                'data': {'error': str(e)},
-                                                'timestamp': int(time.time() * 1000),
-                                                'sessionId': 'pass-detection-improvement'
-                                            }) + '\n')
-                                    except:
-                                        pass
-                                # #endregion
+                        # Add to candidates list (will validate later)
+                        self.pass_candidates.append(candidate)
+                        self.metrics['total_possessions'] += 1
+                        
+                        # Debug: Log candidate collection
+                        if len(self.pass_candidates) % 5 == 0 or len(self.pass_candidates) <= 10:
+                            print(f"[DEBUG] Collected candidate #{len(self.pass_candidates)}: Frame {frame}, Player {candidate['from_player']} -> {candidate['to_player']}, Distance: {np.linalg.norm(candidate['to_pos'] - candidate['from_pos']):.1f}px")
                 
                 # Start new possession
                 self.current_possession = BallPossession(
@@ -571,8 +518,209 @@ class SimplePassDetector:
             created_timestamp=time.time()
         )
     
+    def validate_all_candidates(self) -> None:
+        """
+        PHASE 2: Validate all collected candidates with multi-layer validation.
+        This runs after all frames are processed.
+        """
+        if len(self.pass_candidates) == 0:
+            print(f"\n[Pass Detection] ⚠️  WARNING: No candidates collected! Check ball tracking and possession detection.")
+            return
+        
+        print(f"\n[Pass Detection] Validating {len(self.pass_candidates)} candidates...")
+        
+        rejected_physical = 0
+        rejected_trajectory = 0
+        rejected_temporal = 0
+        rejected_cooldown = 0
+        
+        for candidate in self.pass_candidates:
+            # Layer 1: Physical reality check
+            if not self._validate_physical(candidate):
+                rejected_physical += 1
+                continue
+            
+            # Layer 2: Trajectory validation (MORE LENIENT - allow if no trajectory data)
+            if not self._validate_trajectory_direction(candidate):
+                rejected_trajectory += 1
+                continue
+            
+            # Layer 3: Temporal consistency
+            if not self._validate_temporal(candidate):
+                rejected_temporal += 1
+                continue
+            
+            # All validations passed - create pass event
+            pass_event = self._create_pass_from_candidate(candidate)
+            if pass_event is not None:
+                self.confirmed_passes.append(pass_event)
+                self.metrics['passes_detected'] += 1
+            else:
+                rejected_cooldown += 1
+        
+        print(f"   ✓ Confirmed: {len(self.confirmed_passes)}")
+        print(f"   ✗ Rejected - Physical: {rejected_physical}")
+        print(f"   ✗ Rejected - Trajectory: {rejected_trajectory}")
+        print(f"   ✗ Rejected - Temporal: {rejected_temporal}")
+        print(f"   ✗ Rejected - Cooldown: {rejected_cooldown}")
+    
+    def _validate_physical(self, candidate: Dict) -> bool:
+        """Layer 1: Physical reality check."""
+        duration_frames = candidate['end_frame'] - candidate['start_frame']
+        duration_seconds = duration_frames / self.config['fps']
+        distance = np.linalg.norm(candidate['to_pos'] - candidate['from_pos'])
+        speed = distance / duration_seconds if duration_seconds > 0 else float('inf')
+        
+        # Check minimum duration
+        if duration_seconds < 0.05:  # 1-2 frames at 30fps
+            self.metrics['passes_rejected_duration'] += 1
+            return False
+        
+        # Check distance bounds
+        if distance < self.config['min_pass_distance']:
+            self.metrics['passes_rejected_distance'] += 1
+            return False
+        
+        if distance > self.config['max_pass_distance']:
+            self.metrics['passes_rejected_distance'] += 1
+            return False
+        
+        # Check speed (impossible speeds)
+        if speed > 2000:  # pixels per second
+            self.metrics['passes_rejected_distance'] += 1
+            return False
+        
+        return True
+    
+    def _validate_trajectory_direction(self, candidate: Dict) -> bool:
+        """Layer 2: Trajectory validation - check if ball moved from passer to receiver."""
+        ball_trajectory = candidate['ball_trajectory']
+        
+        # VERY LENIENT: If no trajectory data, accept (ball might be occluded)
+        if len(ball_trajectory) < 2:
+            return True
+        
+        # Calculate expected vs actual direction
+        expected_direction = candidate['to_pos'] - candidate['from_pos']
+        actual_direction = ball_trajectory[-1] - ball_trajectory[0]
+        
+        # Normalize vectors
+        expected_norm = np.linalg.norm(expected_direction)
+        actual_norm = np.linalg.norm(actual_direction)
+        
+        # If not enough movement, accept (ball might be close to players)
+        if expected_norm < 1e-6 or actual_norm < 1e-6:
+            return True
+        
+        expected_unit = expected_direction / expected_norm
+        actual_unit = actual_direction / actual_norm
+        
+        # Cosine similarity (dot product of unit vectors)
+        similarity = np.dot(expected_unit, actual_unit)
+        
+        # MORE LENIENT: Only reject if ball went COMPLETELY wrong way (opposite direction)
+        # Accept if similarity > 0.0 (ball moved in roughly same direction, even if not perfect)
+        # This allows up to 90 degree deviation
+        if similarity < 0.0:  # Ball went backwards/opposite direction
+            self.metrics['passes_rejected_trajectory'] += 1
+            return False
+        
+        return True
+    
+    def _validate_temporal(self, candidate: Dict) -> bool:
+        """Layer 3: Temporal consistency - check if possession was held long enough."""
+        if candidate['possession_frames'] < self.config['min_possession_frames']:
+            self.metrics['passes_rejected_duration'] += 1
+            return False
+        return True
+    
+    def _extract_ball_trajectory(self, start_frame: int, end_frame: int) -> List[np.ndarray]:
+        """Extract ball trajectory between two frames."""
+        trajectory = []
+        for frame_idx, ball_pos in self.ball_trajectory_buffer:
+            if start_frame <= frame_idx <= end_frame:
+                trajectory.append(ball_pos.copy())
+        return trajectory
+    
+    def _create_pass_from_candidate(self, candidate: Dict) -> Optional[PassEvent]:
+        """Create PassEvent from validated candidate."""
+        # Check cooldown
+        if candidate['from_player'] in self.player_cooldowns:
+            if candidate['end_frame'] < self.player_cooldowns[candidate['from_player']]:
+                self.metrics['passes_rejected_cooldown'] += 1
+                return None
+        
+        # Create pass
+        self.pass_counter += 1
+        duration = (candidate['end_frame'] - candidate['start_frame']) / self.config['fps']
+        distance = np.linalg.norm(candidate['to_pos'] - candidate['from_pos'])
+        
+        # Set cooldown
+        self.player_cooldowns[candidate['from_player']] = candidate['end_frame'] + self.config['cooldown_frames']
+        
+        # Determine outcome
+        if candidate['from_team'] == candidate['to_team']:
+            outcome = 'success'
+        else:
+            outcome = 'interception'
+        
+        return PassEvent(
+            event_id=f"pass_{self.pass_counter}",
+            from_player_id=candidate['from_player'],
+            to_player_id=candidate['to_player'],
+            team_id=candidate['from_team'],
+            receiver_team_id=candidate['to_team'],
+            start_frame=candidate['start_frame'],
+            end_frame=candidate['end_frame'],
+            start_position=candidate['from_pos'].tolist(),
+            end_position=candidate['to_pos'].tolist(),
+            confidence=self._calculate_confidence(candidate),
+            distance_meters=float(distance),
+            duration_seconds=duration,
+            lifecycle_stage=PassLifecycleStage.CONFIRMED,
+            created_timestamp=time.time()
+        )
+    
+    def _calculate_confidence(self, candidate: Dict) -> float:
+        """Calculate confidence score for pass event."""
+        confidence = 1.0
+        distance = np.linalg.norm(candidate['to_pos'] - candidate['from_pos'])
+        duration = (candidate['end_frame'] - candidate['start_frame']) / self.config['fps']
+        speed = distance / duration if duration > 0 else 0
+        
+        # Reduce confidence for very short passes
+        if distance < 100:
+            confidence *= 0.8
+        
+        # Reduce confidence for very fast passes
+        if speed > 1000:
+            confidence *= 0.7
+        
+        # Increase confidence for clear trajectory
+        if len(candidate['ball_trajectory']) >= 3:
+            expected = candidate['to_pos'] - candidate['from_pos']
+            actual = candidate['ball_trajectory'][-1] - candidate['ball_trajectory'][0]
+            if np.linalg.norm(expected) > 1e-6 and np.linalg.norm(actual) > 1e-6:
+                expected_unit = expected / np.linalg.norm(expected)
+                actual_unit = actual / np.linalg.norm(actual)
+                similarity = np.dot(expected_unit, actual_unit)
+                if similarity > 0.9:
+                    confidence *= 1.2
+        
+        return min(confidence, 1.0)
+    
     def get_confirmed_passes(self) -> List[PassEvent]:
-        """Get all confirmed passes."""
+        """Get all confirmed passes. Validates candidates if not already done."""
+        # Validate candidates if not already validated
+        if len(self.pass_candidates) > 0 and len(self.confirmed_passes) == 0:
+            self.validate_all_candidates()
+        
+        # Print ball detection stats if available
+        if hasattr(self, '_ball_detection_stats'):
+            stats = self._ball_detection_stats
+            total = stats['detected'] + stats['predicted'] + stats['lost']
+            if total > 0:
+                print(f"   Ball detection: {stats['detected']} detected, {stats['predicted']} predicted, {stats['lost']} lost")
         return self.confirmed_passes.copy()
     
     def get_ball_tracker(self) -> StrictBallTracker:
