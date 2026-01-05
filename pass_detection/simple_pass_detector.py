@@ -17,7 +17,9 @@ import time
 import json
 import os
 
-from .ball_tracker import StrictBallTracker, BallState, BallObservation
+from .ball_tracker import StrictBallTracker, BallState as OldBallState, BallObservation as OldBallObservation
+from .physics_ball_tracker import PhysicsBallTracker, BallState, BallObservation
+from .shot_detector import ShotDetector, ShotEvent, ShotType
 from .pass_event import PassEvent, PassLifecycleStage
 
 
@@ -85,8 +87,15 @@ class SimplePassDetector:
         if config:
             self.config.update(config)
         
-        # Ball tracker - using robust tracker that validates temporal consistency
-        self.ball_tracker = StrictBallTracker(config)
+        # Ball tracker - using physics-based predictive tracker
+        # Set fps in config for physics tracker
+        physics_config = config.copy() if config else {}
+        physics_config['fps'] = self.config.get('fps', 30.0)
+        self.ball_tracker = PhysicsBallTracker(physics_config)
+        
+        # Shot detector - to differentiate shots from passes
+        shot_config = {'fps': self.config.get('fps', 30.0)}
+        self.shot_detector = ShotDetector(shot_config)
         
         # Possession tracking
         self.current_possession: Optional[BallPossession] = None
@@ -96,6 +105,7 @@ class SimplePassDetector:
         # Pass tracking - TWO PHASE SYSTEM
         self.pass_candidates: List[Dict] = []  # Phase 1: Collect all candidates
         self.confirmed_passes: List[PassEvent] = []  # Phase 2: Validated passes
+        self.detected_shots: List[ShotEvent] = []  # Shots detected (not passes)
         self.pass_counter: int = 0
         
         # Cooldowns
@@ -127,6 +137,10 @@ class SimplePassDetector:
             'near_miss_radius': 0,  # Players within 150px but not 100px
             'near_miss_duration': 0,  # Possession changes with < 10 but >= 5 frames
         }
+    
+    def initialize_goal_positions(self, frame_width: int, frame_height: int):
+        """Initialize goal positions for shot detection."""
+        self.shot_detector.estimate_goal_positions(frame_width, frame_height)
     
     def process_frame(self, frame: int,
                      player_positions: Dict[int, np.ndarray],
@@ -177,15 +191,10 @@ class SimplePassDetector:
         
         ball_obs = self.ball_tracker.update(frame, ball_detections)
         
-        # Allow DETECTED and PREDICTED states (only reject LOST)
-        # This allows pass detection even when ball is briefly occluded
+        # Physics tracker ALWAYS provides position (never None)
+        # Accept all states: DETECTED, PREDICTED, INTERPOLATED
         if ball_obs.position is None:
-            return []
-        
-        # Accept both DETECTED and PREDICTED states
-        # PREDICTED is OK for up to 15 frames (ball tracker handles this)
-        # Only reject if truly LOST (no position available)
-        if ball_obs.state == BallState.LOST:
+            # This should never happen with physics tracker, but handle gracefully
             return []
         
         ball_pos = ball_obs.position
@@ -534,11 +543,41 @@ class SimplePassDetector:
         rejected_temporal = 0
         rejected_cooldown = 0
         
-        for candidate in self.pass_candidates:
+        shots_detected = 0
+        
+        for i, candidate in enumerate(self.pass_candidates):
             # Layer 1: Physical reality check
             if not self._validate_physical(candidate):
                 rejected_physical += 1
                 continue
+            
+            # CHECK FOR SHOT FIRST (before pass validation)
+            # Get ball trajectory and end position
+            ball_trajectory = candidate.get('ball_trajectory', [])
+            ball_end_pos = np.array(candidate['to_pos'])
+            
+            # Get player positions at end frame
+            end_frame = candidate['end_frame']
+            player_positions_at_end = self.frame_snapshots.get(end_frame, {}).get('player_positions', {})
+            
+            # Check if this is a shot
+            is_shot, shot_confidence, goal_center = self.shot_detector.is_shot(
+                candidate, ball_trajectory, player_positions_at_end, ball_end_pos
+            )
+            
+            if is_shot:
+                # This is a shot, not a pass - create shot event
+                shot_event = self.shot_detector.create_shot_event(
+                    candidate, ball_trajectory, goal_center, shot_confidence
+                )
+                self.detected_shots.append(shot_event)
+                self.shot_detector.stats['shots_detected'] += 1
+                if shot_event.shot_type == ShotType.SHOT_ON_TARGET:
+                    self.shot_detector.stats['shots_on_target'] += 1
+                shots_detected += 1
+                if len(self.pass_candidates) <= 50:
+                    print(f"   [SHOT DETECTED] Candidate #{i+1}: {shot_event.shot_type.value} at frame {shot_event.start_frame}")
+                continue  # Skip pass validation for shots
             
             # Layer 2: Trajectory validation (MORE LENIENT - allow if no trajectory data)
             if not self._validate_trajectory_direction(candidate):
@@ -558,7 +597,8 @@ class SimplePassDetector:
             else:
                 rejected_cooldown += 1
         
-        print(f"   ✓ Confirmed: {len(self.confirmed_passes)}")
+        print(f"   ✓ Confirmed Passes: {len(self.confirmed_passes)}")
+        print(f"   🎯 Shots Detected: {shots_detected}")
         print(f"   ✗ Rejected - Physical: {rejected_physical}")
         print(f"   ✗ Rejected - Trajectory: {rejected_trajectory}")
         print(f"   ✗ Rejected - Temporal: {rejected_temporal}")
@@ -708,6 +748,13 @@ class SimplePassDetector:
                     confidence *= 1.2
         
         return min(confidence, 1.0)
+    
+    def get_detected_shots(self) -> List[ShotEvent]:
+        """Get all detected shots."""
+        # Validate candidates if not already validated (this also detects shots)
+        if len(self.pass_candidates) > 0 and len(self.confirmed_passes) == 0 and len(self.detected_shots) == 0:
+            self.validate_all_candidates()
+        return self.detected_shots.copy()
     
     def get_confirmed_passes(self) -> List[PassEvent]:
         """Get all confirmed passes. Validates candidates if not already done."""

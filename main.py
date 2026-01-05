@@ -94,6 +94,11 @@ class CompleteSoccerAnalysisPipeline:
         pass_config = {'fps': self.video_fps}
         self.pass_detector = SimplePassDetector(pass_config)
         
+        # Initialize goal positions for shot detection (estimate from video dimensions)
+        if len(frames) > 0:
+            frame_height, frame_width = frames[0].shape[:2]
+            self.pass_detector.initialize_goal_positions(frame_width, frame_height)
+        
         # Step 4: Process all frames with detections, tracking, and tactical analysis
         print("\n[Step 4/8] Processing frames with complete analysis...")
         tactical_frames = []
@@ -216,12 +221,13 @@ class CompleteSoccerAnalysisPipeline:
             else:
                 print("✓ No suspicious gaps found")
         
-        # Step 10: Export passes to CSV
+        # Step 10: Export passes and shots to CSV
         if self.pass_detector:
-            print("\n[Step 10/10] Exporting passes to CSV...")
+            print("\n[Step 10/10] Exporting passes and shots to CSV...")
             passes = self.pass_detector.get_confirmed_passes()
-            csv_path = self._export_passes_to_csv(passes, video_path, output_suffix)
-            print(f"Exported {len(passes)} passes to: {csv_path}")
+            shots = self.pass_detector.get_detected_shots()
+            csv_path = self._export_passes_and_shots_to_csv(passes, shots, video_path, output_suffix)
+            print(f"Exported {len(passes)} passes and {len(shots)} shots to: {csv_path}")
         
         # Summary
         total_time = time.time() - total_start_time
@@ -365,6 +371,107 @@ class CompleteSoccerAnalysisPipeline:
         
         return csv_path
     
+    def _export_passes_and_shots_to_csv(self, passes, shots, video_path: str, suffix: str = "_complete_analysis"):
+        """
+        Export passes and shots to CSV file.
+        
+        Args:
+            passes: List of PassEvent objects
+            shots: List of ShotEvent objects
+            video_path: Path to input video (for generating output path)
+            suffix: Suffix for output filename
+            
+        Returns:
+            Path to CSV file
+        """
+        # Generate CSV path
+        csv_path = video_path.replace(".mp4", f"{suffix}_events.csv")
+        
+        # Team color mapping (0=Purple, 1=Red)
+        team_colors = {
+            0: "Purple",
+            1: "Red"
+        }
+        
+        # Write CSV
+        with open(csv_path, 'w', newline='') as csvfile:
+            fieldnames = [
+                'event_type',  # 'pass' or 'shot'
+                'event_id',
+                'time_start',
+                'time_end',
+                'time_start_seconds',
+                'time_end_seconds',
+                'player_id',  # Passer/Shooter
+                'receiver_player_id',  # Only for passes
+                'team_color',
+                'team_id',
+                'receiver_team_id',  # Only for passes
+                'pass_outcome',  # Only for passes: 'success' or 'interception'
+                'shot_type',  # Only for shots: 'shot_on_target', 'shot_off_target', 'shot_blocked'
+                'duration_seconds',
+                'distance_pixels',
+                'speed_pixels_per_second',
+                'confidence'
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            # Write passes
+            for pass_event in passes:
+                if not pass_event.is_confirmed or pass_event.to_player_id is None:
+                    continue
+                
+                # Determine pass outcome
+                if pass_event.team_id == pass_event.receiver_team_id:
+                    outcome = "success"
+                else:
+                    outcome = "interception"
+                
+                writer.writerow({
+                    'event_type': 'pass',
+                    'event_id': pass_event.event_id,
+                    'time_start': f"{pass_event.start_frame / 30.0:.2f}s",
+                    'time_end': f"{pass_event.end_frame / 30.0:.2f}s" if pass_event.end_frame else "",
+                    'time_start_seconds': pass_event.start_frame / 30.0,
+                    'time_end_seconds': pass_event.end_frame / 30.0 if pass_event.end_frame else 0.0,
+                    'player_id': pass_event.from_player_id,
+                    'receiver_player_id': pass_event.to_player_id,
+                    'team_color': team_colors.get(pass_event.team_id, "Unknown"),
+                    'team_id': pass_event.team_id,
+                    'receiver_team_id': pass_event.receiver_team_id,
+                    'pass_outcome': outcome,
+                    'shot_type': '',
+                    'duration_seconds': pass_event.duration_seconds,
+                    'distance_pixels': pass_event.distance_meters,  # Actually pixels
+                    'speed_pixels_per_second': pass_event.implied_speed,
+                    'confidence': pass_event.confidence
+                })
+            
+            # Write shots
+            for shot_event in shots:
+                writer.writerow({
+                    'event_type': 'shot',
+                    'event_id': shot_event.event_id,
+                    'time_start': f"{shot_event.start_time:.2f}s",
+                    'time_end': f"{shot_event.end_time:.2f}s",
+                    'time_start_seconds': shot_event.start_time,
+                    'time_end_seconds': shot_event.end_time,
+                    'player_id': shot_event.shooter_id,
+                    'receiver_player_id': '',  # Shots have no receiver
+                    'team_color': team_colors.get(shot_event.team_id, "Unknown"),
+                    'team_id': shot_event.team_id,
+                    'receiver_team_id': '',
+                    'pass_outcome': '',
+                    'shot_type': shot_event.shot_type.value,
+                    'duration_seconds': shot_event.duration_seconds,
+                    'distance_pixels': shot_event.distance_pixels,
+                    'speed_pixels_per_second': shot_event.speed_pixels_per_second,
+                    'confidence': shot_event.confidence
+                })
+        
+        return csv_path
+    
     def _analyze_pass_gaps(self, passes, fps: float, max_gap_seconds: float = 8.0):
         """
         Identify suspicious gaps where passes are missing.
@@ -420,8 +527,8 @@ if __name__ == "__main__":
     print("Starting Soccer Analysis...")
     pipeline = CompleteSoccerAnalysisPipeline(model_path, keypoint_model_path)
     
-    # Use the 40-second trimmed video
-    video_path = "/home/essashah/smo_model_new/youtube_video_40s.mp4"
+    # Use the Drogba goal video
+    video_path = "/home/essashah/smo_model_new/drogba_goal_playable.mp4"
     
     # Process all frames in the trimmed video
     output_video = pipeline.analyze_video(video_path, frame_count=-1)    
