@@ -1,4 +1,7 @@
 import cv2
+import subprocess
+import os
+import tempfile
 
 def read_video(vid_path, frame_count=300):
     """This function reads a video file and yields each frame of the video"""
@@ -52,17 +55,71 @@ def read_video(vid_path, frame_count=300):
 
 
 def write_video(frames, out_path, fps=30):
-    """This function writes the frames to a video file"""
-
+    """This function writes the frames to a video file using ffmpeg for H.264 encoding"""
+    
     height, width, _ = frames[0].shape
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
-
-    for frame in frames:
-        out.write(frame)
-
-    out.release()
+    
+    # Use ffmpeg for proper H.264 encoding (much better compatibility than OpenCV's VideoWriter)
+    # Write frames to temporary file, then encode with ffmpeg
+    temp_dir = tempfile.gettempdir()
+    temp_input = os.path.join(temp_dir, f"temp_video_frames_{os.getpid()}.mp4")
+    
+    # First, write with OpenCV to temp file (faster for writing)
+    print(f"Writing {len(frames)} frames to temporary file...")
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    temp_writer = cv2.VideoWriter(temp_input, fourcc, fps, (width, height))
+    
+    if not temp_writer.isOpened():
+        # Fallback to XVID if mp4v fails
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        temp_writer = cv2.VideoWriter(temp_input, fourcc, fps, (width, height))
+        if not temp_writer.isOpened():
+            raise RuntimeError(f"Failed to initialize temporary video writer")
+    
+    for i, frame in enumerate(frames):
+        temp_writer.write(frame)
+        if (i + 1) % 100 == 0:
+            print(f"  Written {i + 1}/{len(frames)} frames ({100*(i+1)/len(frames):.1f}%)", end='\r')
+    
+    temp_writer.release()
     cv2.destroyAllWindows()
+    
+    # Now re-encode with ffmpeg to H.264 for maximum compatibility
+    print(f"\nEncoding to H.264 with ffmpeg...")
+    ffmpeg_cmd = [
+        'ffmpeg', '-y',  # Overwrite output
+        '-i', temp_input,  # Input file
+        '-c:v', 'libx264',  # H.264 codec
+        '-preset', 'medium',  # Encoding speed/quality balance
+        '-crf', '23',  # Quality (18-28, lower = better quality)
+        '-pix_fmt', 'yuv420p',  # Pixel format for compatibility
+        '-movflags', '+faststart',  # Enable fast start for web playback
+        out_path
+    ]
+    
+    try:
+        result = subprocess.run(
+            ffmpeg_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True
+        )
+        print(f"✅ Successfully encoded {len(frames)} frames to {out_path}")
+    except subprocess.CalledProcessError as e:
+        # If ffmpeg fails, try to use the temp file as output
+        print(f"Warning: ffmpeg encoding failed, using temporary file: {e.stderr.decode()}")
+        if os.path.exists(temp_input):
+            os.rename(temp_input, out_path)
+            print(f"✅ Saved video to {out_path} (without H.264 re-encoding)")
+        else:
+            raise RuntimeError(f"Failed to encode video: {e.stderr.decode()}")
+    finally:
+        # Clean up temporary file
+        if os.path.exists(temp_input) and os.path.exists(out_path):
+            try:
+                os.remove(temp_input)
+            except:
+                pass
 
 
 def show_image(image, title="Image"):

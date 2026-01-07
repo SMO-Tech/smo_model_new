@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from typing import List
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_DIR))
 
@@ -217,17 +218,26 @@ class CompleteSoccerAnalysisPipeline:
             if gaps:
                 print(f"⚠️  Found {len(gaps)} suspicious gaps (>8 seconds)")
                 for gap in gaps:
-                    print(f"   Gap: {gap['gap_seconds']:.1f}s from {gap['start_time']:.1f}s to {gap['end_time']:.1f}s")
+                    end_time_str = f"{gap['end_time']:.1f}s" if gap['end_time'] is not None else "end"
+                    print(f"   Gap: {gap['gap_seconds']:.1f}s from {gap['start_time']:.1f}s to {end_time_str}")
             else:
                 print("✓ No suspicious gaps found")
         
         # Step 10: Export passes and shots to CSV
         if self.pass_detector:
             print("\n[Step 10/10] Exporting passes and shots to CSV...")
+            # Get passes first (this will trigger validation if needed)
             passes = self.pass_detector.get_confirmed_passes()
+            # Get shots (validation already done, so won't duplicate)
             shots = self.pass_detector.get_detected_shots()
             csv_path = self._export_passes_and_shots_to_csv(passes, shots, video_path, output_suffix)
             print(f"Exported {len(passes)} passes and {len(shots)} shots to: {csv_path}")
+            
+            # Display stats summary
+            print("\n" + "=" * 60)
+            print("📊 SHOTS & PASSES STATISTICS")
+            print("=" * 60)
+            self._display_shots_and_passes_stats(passes, shots)
         
         # Summary
         total_time = time.time() - total_start_time
@@ -448,8 +458,14 @@ class CompleteSoccerAnalysisPipeline:
                     'confidence': pass_event.confidence
                 })
             
-            # Write shots
+            # Write shots (avoid duplicates by tracking written IDs)
+            written_shot_ids = set()
             for shot_event in shots:
+                # Skip duplicates
+                if shot_event.event_id in written_shot_ids:
+                    continue
+                written_shot_ids.add(shot_event.event_id)
+                
                 writer.writerow({
                     'event_type': 'shot',
                     'event_id': shot_event.event_id,
@@ -519,7 +535,65 @@ class CompleteSoccerAnalysisPipeline:
                 })
         
         return gaps
-
+    
+    def _display_shots_and_passes_stats(self, passes: List, shots: List):
+        """
+        Display formatted statistics for shots and passes by team.
+        
+        Args:
+            passes: List of PassEvent objects
+            shots: List of ShotEvent objects
+        """
+        from pass_detection.shot_detector import ShotType
+        
+        # Calculate stats by team
+        team_0_passes = [p for p in passes if p.team_id == 0]
+        team_1_passes = [p for p in passes if p.team_id == 1]
+        
+        team_0_shots = [s for s in shots if s.team_id == 0]
+        team_1_shots = [s for s in shots if s.team_id == 1]
+        
+        # Pass stats
+        team_0_successful_passes = len([p for p in team_0_passes if p.receiver_team_id == p.team_id])
+        team_0_interceptions = len([p for p in team_0_passes if p.receiver_team_id != p.team_id])
+        team_1_successful_passes = len([p for p in team_1_passes if p.receiver_team_id == p.team_id])
+        team_1_interceptions = len([p for p in team_1_passes if p.receiver_team_id != p.team_id])
+        
+        # Shot stats
+        team_0_total_shots = len(team_0_shots)
+        team_0_shots_on_target = len([s for s in team_0_shots if s.shot_type == ShotType.SHOT_ON_TARGET])
+        team_0_shots_off_target = len([s for s in team_0_shots if s.shot_type == ShotType.SHOT_OFF_TARGET])
+        team_0_shots_blocked = len([s for s in team_0_shots if s.shot_type == ShotType.SHOT_BLOCKED])
+        
+        team_1_total_shots = len(team_1_shots)
+        team_1_shots_on_target = len([s for s in team_1_shots if s.shot_type == ShotType.SHOT_ON_TARGET])
+        team_1_shots_off_target = len([s for s in team_1_shots if s.shot_type == ShotType.SHOT_OFF_TARGET])
+        team_1_shots_blocked = len([s for s in team_1_shots if s.shot_type == ShotType.SHOT_BLOCKED])
+        
+        # Calculate pass accuracy
+        team_0_pass_accuracy = (team_0_successful_passes / len(team_0_passes) * 100) if len(team_0_passes) > 0 else 0.0
+        team_1_pass_accuracy = (team_1_successful_passes / len(team_1_passes) * 100) if len(team_1_passes) > 0 else 0.0
+        
+        # Display formatted stats
+        print(f"\n{'SHOTS':<20} {'Team 0 (Purple)':<20} {'Team 1 (Red)':<20}")
+        print("-" * 60)
+        print(f"{'Total Shots':<20} {team_0_total_shots:<20} {team_1_total_shots:<20}")
+        print(f"{'Shots On Target':<20} {team_0_shots_on_target:<20} {team_1_shots_on_target:<20}")
+        print(f"{'Shots Off Target':<20} {team_0_shots_off_target:<20} {team_1_shots_off_target:<20}")
+        print(f"{'Shots Blocked':<20} {team_0_shots_blocked:<20} {team_1_shots_blocked:<20}")
+        
+        print(f"\n{'PASSES':<20} {'Team 0 (Purple)':<20} {'Team 1 (Red)':<20}")
+        print("-" * 60)
+        print(f"{'Total Passes':<20} {len(team_0_passes):<20} {len(team_1_passes):<20}")
+        print(f"{'Successful':<20} {team_0_successful_passes:<20} {team_1_successful_passes:<20}")
+        print(f"{'Intercepted':<20} {team_0_interceptions:<20} {team_1_interceptions:<20}")
+        print(f"{'Pass Accuracy':<20} {team_0_pass_accuracy:.1f}%{'':<15} {team_1_pass_accuracy:.1f}%")
+        
+        print(f"\n{'SUMMARY':<20} {'Team 0 (Purple)':<20} {'Team 1 (Red)':<20}")
+        print("-" * 60)
+        print(f"{'Total Events':<20} {len(team_0_passes) + team_0_total_shots:<20} {len(team_1_passes) + team_1_total_shots:<20}")
+        
+        print("=" * 60)
 
 
 if __name__ == "__main__":
@@ -528,7 +602,7 @@ if __name__ == "__main__":
     pipeline = CompleteSoccerAnalysisPipeline(model_path, keypoint_model_path)
     
     # Use the Drogba goal video
-    video_path = "/home/essashah/smo_model_new/youtube_shots_l3V5P1Sj6qI.mp4"
+    video_path = "/home/essashah/SWE/soccer_video_2k.mp4"
 
     
     # Process all frames in the trimmed video

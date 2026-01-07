@@ -47,7 +47,8 @@ class SimplePassDetector:
         """Initialize the simple pass detector."""
         self.config = {
             # Possession thresholds - IN PIXELS (MORE LENIENT FOR BETTER DETECTION)
-            'possession_radius': 200.0,    # Increased from 150 to 200 (catch more passes)
+            'possession_radius': 300.0,    # Increased from 200 to 300 (catch more passes)
+            'possession_tolerance': 100.0,   # Tolerance margin: if ball is within this distance of radius, still consider in possession
             'min_pass_distance': 50.0,     # Reduced from 80 to 50 (allow shorter passes)
             'max_pass_distance': 1200.0,  # Increased from 800 to 1200 (allow longer passes)
             
@@ -78,10 +79,10 @@ class SimplePassDetector:
             
             # Dynamic radius (MORE LENIENT)
             'dynamic_radius_enabled': True,  # Enable dynamic possession radius
-            'base_radius': 200.0,  # Increased from 150 to 200
+            'base_radius': 300.0,  # Increased from 200 to 300
             'speed_factor': 2.5,  # Increased from 2.0 to 2.5
-            'min_radius': 150.0,  # Increased from 120 to 150
-            'max_radius': 350.0,  # Increased from 250 to 350
+            'min_radius': 250.0,  # Increased from 150 to 250
+            'max_radius': 500.0,  # Increased from 350 to 500
         }
         
         if config:
@@ -101,6 +102,7 @@ class SimplePassDetector:
         self.current_possession: Optional[BallPossession] = None
         self.possession_frames: int = 0
         self.last_possession_frame: int = -1
+        self.last_shot_candidate_frame: int = -1  # Track last frame where we created a shot candidate for current possession
         
         # Pass tracking - TWO PHASE SYSTEM
         self.pass_candidates: List[Dict] = []  # Phase 1: Collect all candidates
@@ -191,6 +193,27 @@ class SimplePassDetector:
         
         ball_obs = self.ball_tracker.update(frame, ball_detections)
         
+        # #region agent log - BALL TRACKING STATE
+        try:
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'C',
+                    'location': 'simple_pass_detector.py:192',
+                    'message': 'ball_tracking_state',
+                    'data': {
+                        'frame': int(frame),
+                        'ball_detections_provided': ball_detections is not None,
+                        'ball_obs_state': str(ball_obs.state) if ball_obs else 'None',
+                        'ball_position': ball_obs.position.tolist() if ball_obs and ball_obs.position is not None else None,
+                        'num_players': len(player_positions)
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'run1'
+                }) + '\n')
+        except: pass
+        # #endregion
+        
         # Physics tracker ALWAYS provides position (never None)
         # Accept all states: DETECTED, PREDICTED, INTERPOLATED
         if ball_obs.position is None:
@@ -269,7 +292,60 @@ class SimplePassDetector:
                     pass
                 # #endregion
         
-        if closest_player is not None and closest_distance <= current_radius:
+
+        # #region agent log - POSSESSION CHECK
+        try:
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'A,C',
+                    'location': 'simple_pass_detector.py:293',
+                    'message': 'possession_check',
+                    'data': {
+                        'frame': int(frame),
+                        'closest_player': int(closest_player) if closest_player is not None else None,
+                        'closest_distance': float(closest_distance) if closest_player is not None else None,
+                        'current_radius': float(current_radius),
+                        'within_radius': closest_player is not None and closest_distance <= current_radius,
+                        'current_possession_player': int(self.current_possession.player_id) if (self.current_possession is not None and hasattr(self.current_possession, 'player_id')) else None,
+                        'current_possession_frames': int(self.possession_frames) if (self.current_possession is not None) else 0
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'run1'
+                }) + '\n')
+        except: pass
+        # #endregion
+        
+        # Add tolerance margin: if ball is within tolerance of radius, still consider it in possession
+        # This helps catch passes where ball is moving quickly and might be slightly outside strict radius
+        possession_tolerance = self.config.get('possession_tolerance', 50.0)
+        effective_radius = current_radius + possession_tolerance
+        
+        # #region agent log - POSSESSION CHECK WITH TOLERANCE
+        try:
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'B',
+                    'location': 'simple_pass_detector.py:318',
+                    'message': 'possession_check_with_tolerance',
+                    'data': {
+                        'frame': int(frame),
+                        'closest_player': int(closest_player) if closest_player is not None else None,
+                        'closest_distance': float(closest_distance) if closest_player is not None else None,
+                        'current_radius': float(current_radius),
+                        'possession_tolerance': float(possession_tolerance),
+                        'effective_radius': float(effective_radius),
+                        'within_effective_radius': closest_player is not None and closest_distance <= effective_radius,
+                        'within_strict_radius': closest_player is not None and closest_distance <= current_radius
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'run1'
+                }) + '\n')
+        except: pass
+        # #endregion
+        
+        if closest_player is not None and closest_distance <= effective_radius:
             team_id = self.team_map.get(closest_player, 0)
             
             if self.current_possession is None:
@@ -281,35 +357,39 @@ class SimplePassDetector:
                     position=player_positions[closest_player].copy()
                 )
                 self.possession_frames = 1
-                self.metrics['total_possessions'] += 1
+                self.last_shot_candidate_frame = -1  # Reset shot candidate tracking for new possession
+                # Don't count first possession as a "total possession" - only count when candidates are created
+                # self.metrics['total_possessions'] += 1  # REMOVED
                 
             elif self.current_possession.player_id != closest_player:
                 # Possession change - potential pass
+                # #region agent log - POSSESSION CHANGE DETECTED
+                try:
+                    with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({
+                            'hypothesisId': 'A,C',
+                            'location': 'simple_pass_detector.py:287',
+                            'message': 'possession_change_detected',
+                            'data': {
+                                'frame': int(frame),
+                                'from_player': int(self.current_possession.player_id),
+                                'to_player': int(closest_player),
+                                'from_team': int(self.current_possession.team_id),
+                                'to_team': int(team_id),
+                                'possession_frames': int(self.possession_frames),
+                                'min_possession_frames': int(self.config['min_possession_frames']),
+                                'meets_min_frames': self.possession_frames >= self.config['min_possession_frames']
+                            },
+                            'timestamp': int(time.time() * 1000),
+                            'sessionId': 'debug-session',
+                            'runId': 'run1'
+                        }) + '\n')
+                except: pass
+                # #endregion
+                
                 # Track near-miss duration (old threshold vs new)
                 if 5 <= self.possession_frames < 10:
                     self.metrics['near_miss_duration'] += 1
-                    # #region agent log - NEAR MISS DURATION
-                    try:
-                        with open(self.debug_log_path, 'a') as f:
-                            f.write(json.dumps({
-                                'hypothesisId': 'B',
-                                'location': 'simple_pass_detector:possession_change',
-                                'message': 'near_miss_duration',
-                                'data': {
-                                    'frame': int(frame),
-                                    'from_player': int(self.current_possession.player_id),
-                                    'to_player': int(closest_player),
-                                    'possession_frames': self.possession_frames,
-                                    'old_threshold': 10,
-                                    'new_threshold': 5,
-                                    'would_detect': True
-                                },
-                                'timestamp': int(time.time() * 1000),
-                                'sessionId': 'pass-detection-improvement'
-                            }) + '\n')
-                    except:
-                        pass
-                    # #endregion
                 
                 # PHASE 1: COLLECT CANDIDATES (Very lenient - no early rejection)
                 # Only check minimum possession frames, collect everything else
@@ -320,6 +400,30 @@ class SimplePassDetector:
                     # Allow both same-team passes AND interceptions
                     detect_interceptions = self.config.get('detect_interceptions', True)
                     is_valid_pass_type = same_team or detect_interceptions
+                    
+                    # #region agent log - CANDIDATE VALIDATION CHECK
+                    try:
+                        with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                'hypothesisId': 'B,D',
+                                'location': 'simple_pass_detector.py:318',
+                                'message': 'candidate_validation_check',
+                                'data': {
+                                    'frame': int(frame),
+                                    'from_player': int(self.current_possession.player_id),
+                                    'to_player': int(closest_player),
+                                    'same_team': bool(same_team),
+                                    'detect_interceptions': bool(detect_interceptions),
+                                    'is_valid_pass_type': bool(is_valid_pass_type),
+                                    'different_player': self.current_possession.player_id != closest_player,
+                                    'will_create_candidate': is_valid_pass_type and self.current_possession.player_id != closest_player
+                                },
+                                'timestamp': int(time.time() * 1000),
+                                'sessionId': 'debug-session',
+                                'runId': 'run1'
+                            }) + '\n')
+                    except: pass
+                    # #endregion
                     
                     if is_valid_pass_type and self.current_possession.player_id != closest_player:
                         # PHASE 1: Collect candidate (NO validation yet)
@@ -343,9 +447,95 @@ class SimplePassDetector:
                         self.pass_candidates.append(candidate)
                         self.metrics['total_possessions'] += 1
                         
+                        # #region agent log - CANDIDATE CREATED
+                        try:
+                            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                                f.write(json.dumps({
+                                    'hypothesisId': 'A,B,C,D',
+                                    'location': 'simple_pass_detector.py:343',
+                                    'message': 'candidate_created',
+                                    'data': {
+                                        'frame': int(frame),
+                                        'candidate_num': len(self.pass_candidates),
+                                        'from_player': int(candidate['from_player']),
+                                        'to_player': int(candidate['to_player']),
+                                        'distance': float(np.linalg.norm(candidate['to_pos'] - candidate['from_pos'])),
+                                        'possession_frames': int(self.possession_frames)
+                                    },
+                                    'timestamp': int(time.time() * 1000),
+                                    'sessionId': 'debug-session',
+                                    'runId': 'run1'
+                                }) + '\n')
+                        except: pass
+                        # #endregion
+                        
                         # Debug: Log candidate collection
-                        if len(self.pass_candidates) % 5 == 0 or len(self.pass_candidates) <= 10:
-                            print(f"[DEBUG] Collected candidate #{len(self.pass_candidates)}: Frame {frame}, Player {candidate['from_player']} -> {candidate['to_player']}, Distance: {np.linalg.norm(candidate['to_pos'] - candidate['from_pos']):.1f}px")
+                        if len(self.pass_candidates) <= 10:
+                            print(f"[DEBUG] Collected candidate #{len(self.pass_candidates)}: Frame {frame}, Player {candidate['from_player']} -> {candidate['to_player']}, Distance: {np.linalg.norm(candidate['to_pos'] - candidate['from_pos']):.1f}px, Possession frames: {self.possession_frames}")
+                    else:
+                        # #region agent log - CANDIDATE REJECTED
+                        try:
+                            reason = []
+                            if not is_valid_pass_type:
+                                reason.append('invalid_pass_type')
+                            if self.current_possession.player_id == closest_player:
+                                reason.append('same_player')
+                            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                                f.write(json.dumps({
+                                    'hypothesisId': 'B,D',
+                                    'location': 'simple_pass_detector.py:350',
+                                    'message': 'candidate_rejected',
+                                    'data': {
+                                        'frame': int(frame),
+                                        'from_player': int(self.current_possession.player_id),
+                                        'to_player': int(closest_player),
+                                        'reason': reason,
+                                        'same_team': bool(same_team),
+                                        'is_valid_pass_type': bool(is_valid_pass_type),
+                                        'different_player': self.current_possession.player_id != closest_player
+                                    },
+                                    'timestamp': int(time.time() * 1000),
+                                    'sessionId': 'debug-session',
+                                    'runId': 'run1'
+                                }) + '\n')
+                        except: pass
+                        # #endregion
+                        
+                        # Debug: Log why candidate wasn't created
+                        if len(self.pass_candidates) <= 10:
+                            reason = []
+                            if self.possession_frames < self.config['min_possession_frames']:
+                                reason.append(f"possession too short ({self.possession_frames} < {self.config['min_possession_frames']})")
+                            if not is_valid_pass_type:
+                                reason.append(f"not valid pass type (same_team={same_team}, detect_interceptions={detect_interceptions})")
+                            if self.current_possession.player_id == closest_player:
+                                reason.append("same player")
+                            print(f"[DEBUG] Skipped candidate at frame {frame}: {', '.join(reason) if reason else 'unknown'}")
+                else:
+                    # #region agent log - CANDIDATE REJECTED TOO SHORT
+                    try:
+                        with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                'hypothesisId': 'A',
+                                'location': 'simple_pass_detector.py:361',
+                                'message': 'candidate_rejected_too_short',
+                                'data': {
+                                    'frame': int(frame),
+                                    'from_player': int(self.current_possession.player_id),
+                                    'to_player': int(closest_player),
+                                    'possession_frames': int(self.possession_frames),
+                                    'min_possession_frames': int(self.config['min_possession_frames'])
+                                },
+                                'timestamp': int(time.time() * 1000),
+                                'sessionId': 'debug-session',
+                                'runId': 'run1'
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+                    
+                    # Debug: Log why candidate wasn't created (possession too short)
+                    if len(self.pass_candidates) <= 10:
+                        print(f"[DEBUG] Skipped candidate at frame {frame}: possession too short ({self.possession_frames} < {self.config['min_possession_frames']})")
                 
                 # Start new possession
                 self.current_possession = BallPossession(
@@ -355,12 +545,89 @@ class SimplePassDetector:
                     position=player_positions[closest_player].copy()
                 )
                 self.possession_frames = 1
+                self.last_shot_candidate_frame = -1  # Reset shot candidate tracking for new possession
                 self.metrics['total_possessions'] += 1
             else:
                 # Same player still has ball
                 self.possession_frames += 1
         else:
             # Ball not in possession of anyone
+            # #region agent log - BALL OUT OF POSSESSION
+            try:
+                with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({
+                        'hypothesisId': 'C',
+                        'location': 'simple_pass_detector.py:519',
+                        'message': 'ball_out_of_possession',
+                        'data': {
+                            'frame': int(frame),
+                            'closest_player': int(closest_player) if closest_player is not None else None,
+                            'closest_distance': float(closest_distance) if closest_player is not None else None,
+                            'current_radius': float(current_radius),
+                            'had_possession': self.current_possession is not None,
+                            'previous_player': int(self.current_possession.player_id) if self.current_possession else None,
+                            'previous_possession_frames': int(self.possession_frames) if self.current_possession else 0
+                        },
+                        'timestamp': int(time.time() * 1000),
+                        'sessionId': 'debug-session',
+                        'runId': 'run1'
+                    }) + '\n')
+            except: pass
+            # #endregion
+            
+            # Check if this could be a shot: player had possession, ball went out of possession
+            # This happens when a player shoots and ball goes toward goal (no receiver)
+            # CRITICAL: Only create ONE shot candidate per possession loss (not one per frame)
+            if (self.current_possession is not None and 
+                self.possession_frames >= self.config['min_possession_frames'] and
+                frame != self.last_shot_candidate_frame):  # Only create once per possession loss
+                # Ball went out of possession - could be a shot
+                # Create a shot candidate with no receiver (to_player = None)
+                ball_traj = self._extract_ball_trajectory(self.current_possession.start_frame, frame)
+                
+                # Check if ball trajectory points toward goal (using shot detector logic)
+                if self.shot_detector and len(ball_traj) >= 2:
+                    # Get ball end position
+                    ball_end_pos = ball_traj[-1] if ball_traj else ball_pos
+                    
+                    # Check if this might be a shot (ball moving toward goal, no receiver)
+                    shot_candidate = {
+                        'from_player': self.current_possession.player_id,
+                        'to_player': None,  # No receiver - ball goes to goal
+                        'from_team': self.current_possession.team_id,
+                        'to_team': None,
+                        'start_frame': self.current_possession.start_frame,
+                        'end_frame': frame,
+                        'from_pos': self.current_possession.position.copy(),
+                        'to_pos': ball_end_pos.copy(),
+                        'possession_frames': self.possession_frames,
+                        'ball_trajectory': ball_traj
+                    }
+                    
+                    # Add to candidates - will be checked for shots in validate_all_candidates
+                    self.pass_candidates.append(shot_candidate)
+                    self.last_shot_candidate_frame = frame  # Mark that we created a candidate for this possession
+                    
+                    # #region agent log - SHOT CANDIDATE CREATED
+                    try:
+                        with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                'hypothesisId': 'F',
+                                'location': 'simple_pass_detector.py:575',
+                                'message': 'shot_candidate_created',
+                                'data': {
+                                    'frame': int(frame),
+                                    'from_player': int(self.current_possession.player_id),
+                                    'possession_frames': int(self.possession_frames),
+                                    'ball_end_pos': ball_end_pos.tolist()
+                                },
+                                'timestamp': int(time.time() * 1000),
+                                'sessionId': 'debug-session',
+                                'runId': 'run1'
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+            
             # Keep current possession but don't increment frames
             pass
         
@@ -549,6 +816,8 @@ class SimplePassDetector:
             # Layer 1: Physical reality check
             if not self._validate_physical(candidate):
                 rejected_physical += 1
+                if len(self.pass_candidates) <= 10:
+                    print(f"   [REJECTED - Physical] Candidate #{i+1}: frame {candidate['start_frame']} -> {candidate['end_frame']}")
                 continue
             
             # CHECK FOR SHOT FIRST (before pass validation)
@@ -560,10 +829,53 @@ class SimplePassDetector:
             end_frame = candidate['end_frame']
             player_positions_at_end = self.frame_snapshots.get(end_frame, {}).get('player_positions', {})
             
+            # #region agent log - SHOT CHECK
+            try:
+                with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({
+                        'hypothesisId': 'D',
+                        'location': 'simple_pass_detector.py:776',
+                        'message': 'shot_check',
+                        'data': {
+                            'frame': int(candidate['start_frame']),
+                            'from_player': int(candidate['from_player']),
+                            'to_player': int(candidate['to_player']),
+                            'ball_end_pos': ball_end_pos.tolist(),
+                            'goal_positions_set': self.shot_detector.left_goal_center is not None and self.shot_detector.right_goal_center is not None,
+                            'left_goal': self.shot_detector.left_goal_center.tolist() if self.shot_detector.left_goal_center is not None else None,
+                            'right_goal': self.shot_detector.right_goal_center.tolist() if self.shot_detector.right_goal_center is not None else None
+                        },
+                        'timestamp': int(time.time() * 1000),
+                        'sessionId': 'debug-session',
+                        'runId': 'run1'
+                    }) + '\n')
+            except: pass
+            # #endregion
+            
             # Check if this is a shot
             is_shot, shot_confidence, goal_center = self.shot_detector.is_shot(
                 candidate, ball_trajectory, player_positions_at_end, ball_end_pos
             )
+            
+            # #region agent log - SHOT CHECK RESULT
+            try:
+                with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({
+                        'hypothesisId': 'D',
+                        'location': 'simple_pass_detector.py:800',
+                        'message': 'shot_check_result',
+                        'data': {
+                            'frame': int(candidate['start_frame']),
+                            'is_shot': bool(is_shot),
+                            'shot_confidence': float(shot_confidence),
+                            'goal_center': goal_center.tolist() if goal_center is not None else None
+                        },
+                        'timestamp': int(time.time() * 1000),
+                        'sessionId': 'debug-session',
+                        'runId': 'run1'
+                    }) + '\n')
+            except: pass
+            # #endregion
             
             if is_shot:
                 # This is a shot, not a pass - create shot event
@@ -575,18 +887,22 @@ class SimplePassDetector:
                 if shot_event.shot_type == ShotType.SHOT_ON_TARGET:
                     self.shot_detector.stats['shots_on_target'] += 1
                 shots_detected += 1
-                if len(self.pass_candidates) <= 50:
+                if len(self.pass_candidates) <= 10:
                     print(f"   [SHOT DETECTED] Candidate #{i+1}: {shot_event.shot_type.value} at frame {shot_event.start_frame}")
                 continue  # Skip pass validation for shots
             
             # Layer 2: Trajectory validation (MORE LENIENT - allow if no trajectory data)
             if not self._validate_trajectory_direction(candidate):
                 rejected_trajectory += 1
+                if len(self.pass_candidates) <= 10:
+                    print(f"   [REJECTED - Trajectory] Candidate #{i+1}: frame {candidate['start_frame']} -> {candidate['end_frame']}")
                 continue
             
             # Layer 3: Temporal consistency
             if not self._validate_temporal(candidate):
                 rejected_temporal += 1
+                if len(self.pass_candidates) <= 10:
+                    print(f"   [REJECTED - Temporal] Candidate #{i+1}: frame {candidate['start_frame']} -> {candidate['end_frame']}")
                 continue
             
             # All validations passed - create pass event
@@ -594,8 +910,12 @@ class SimplePassDetector:
             if pass_event is not None:
                 self.confirmed_passes.append(pass_event)
                 self.metrics['passes_detected'] += 1
+                if len(self.pass_candidates) <= 10:
+                    print(f"   [PASS CONFIRMED] Candidate #{i+1}: Player {candidate['from_player']} -> Player {candidate['to_player']} at frame {candidate['start_frame']}")
             else:
                 rejected_cooldown += 1
+                if len(self.pass_candidates) <= 10:
+                    print(f"   [REJECTED - Cooldown] Candidate #{i+1}: frame {candidate['start_frame']} -> {candidate['end_frame']}")
         
         print(f"   ✓ Confirmed Passes: {len(self.confirmed_passes)}")
         print(f"   🎯 Shots Detected: {shots_detected}")
@@ -684,6 +1004,27 @@ class SimplePassDetector:
     
     def _create_pass_from_candidate(self, candidate: Dict) -> Optional[PassEvent]:
         """Create PassEvent from validated candidate."""
+        # #region agent log - COOLDOWN CHECK
+        try:
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'E',
+                    'location': 'simple_pass_detector.py:697',
+                    'message': 'cooldown_check',
+                    'data': {
+                        'from_player': int(candidate['from_player']),
+                        'end_frame': int(candidate['end_frame']),
+                        'in_cooldown': candidate['from_player'] in self.player_cooldowns,
+                        'cooldown_until': int(self.player_cooldowns.get(candidate['from_player'], -1)),
+                        'will_reject': candidate['from_player'] in self.player_cooldowns and candidate['end_frame'] < self.player_cooldowns[candidate['from_player']]
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'run1'
+                }) + '\n')
+        except: pass
+        # #endregion
+        
         # Check cooldown
         if candidate['from_player'] in self.player_cooldowns:
             if candidate['end_frame'] < self.player_cooldowns[candidate['from_player']]:
@@ -759,7 +1100,8 @@ class SimplePassDetector:
     def get_confirmed_passes(self) -> List[PassEvent]:
         """Get all confirmed passes. Validates candidates if not already done."""
         # Validate candidates if not already validated
-        if len(self.pass_candidates) > 0 and len(self.confirmed_passes) == 0:
+        # Only validate once - if shots were already detected, don't validate again
+        if len(self.pass_candidates) > 0 and len(self.confirmed_passes) == 0 and len(self.detected_shots) == 0:
             self.validate_all_candidates()
         
         # Print ball detection stats if available

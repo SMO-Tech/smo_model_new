@@ -65,23 +65,28 @@ class ShotDetector:
     def __init__(self, config: Optional[Dict] = None):
         """Initialize shot detector."""
         self.config = {
-            # Goal detection
+            # Goal detection - ADAPTIVE based on video resolution
             'goal_detection_enabled': True,
             'goal_width_pixels': 200.0,  # Approximate goal width in pixels (adjust based on video)
             'goal_height_pixels': 80.0,  # Approximate goal height in pixels
-            'goal_area_tolerance': 150.0,  # Pixels - how close ball must be to goal
+            'goal_area_tolerance': 400.0,  # Pixels - how close ball must be to goal (adaptive, scales with resolution)
+            'goal_area_tolerance_ratio': 0.25,  # Ratio of frame width - adaptive tolerance based on video size (balanced to catch shots but not passes)
             
-            # Shot detection thresholds
-            'min_shot_speed': 300.0,  # pixels/second - shots are faster than passes
-            'min_shot_distance': 100.0,  # pixels - minimum distance for a shot
-            'max_shot_distance': 2000.0,  # pixels - maximum realistic shot distance
+            # Shot detection thresholds - ADAPTIVE
+            'min_shot_speed': 200.0,  # pixels/second - shots are faster than passes (lowered for better detection)
+            'min_shot_distance': 50.0,  # pixels - minimum distance for a shot (lowered)
+            'max_shot_distance': 3000.0,  # pixels - maximum realistic shot distance (increased)
             
-            # Trajectory analysis
-            'goal_direction_threshold': 0.7,  # Cosine similarity - ball must move toward goal
-            'min_trajectory_frames': 5,  # Minimum frames for trajectory analysis
+            # Trajectory analysis - MORE LENIENT
+            'goal_direction_threshold': 0.3,  # Cosine similarity - lowered from 0.7 for better detection
+            'min_trajectory_frames': 2,  # Minimum frames for trajectory analysis (reduced)
             
             # Frame rate
             'fps': 30.0,
+            
+            # Video resolution (will be set automatically)
+            'frame_width': 1920,
+            'frame_height': 1080,
         }
         
         if config:
@@ -109,6 +114,14 @@ class ShotDetector:
         Goals are typically at the left and right edges of the field.
         This is a simple estimation - can be improved with keypoint detection.
         """
+        # Store frame dimensions for adaptive thresholds
+        self.config['frame_width'] = frame_width
+        self.config['frame_height'] = frame_height
+        
+        # Adaptive goal area tolerance based on frame width (15% of width, min 300px)
+        adaptive_tolerance = frame_width * self.config.get('goal_area_tolerance_ratio', 0.15)
+        self.config['goal_area_tolerance'] = max(adaptive_tolerance, 300.0)
+        
         # Estimate goals at left and right edges (middle vertically)
         self.left_goal_center = np.array([
             0.05 * frame_width,  # 5% from left edge
@@ -120,7 +133,7 @@ class ShotDetector:
             frame_height / 2.0   # Middle vertically
         ], dtype=np.float32)
         
-        print(f"[Shot Detector] Estimated goal positions:")
+        print(f"[Shot Detector] Estimated goal positions (adaptive tolerance: {self.config['goal_area_tolerance']:.1f}px):")
         print(f"  Left goal: ({self.left_goal_center[0]:.1f}, {self.left_goal_center[1]:.1f})")
         print(f"  Right goal: ({self.right_goal_center[0]:.1f}, {self.right_goal_center[1]:.1f})")
     
@@ -214,6 +227,28 @@ class ShotDetector:
         Returns:
             (is_shot, confidence, goal_center)
         """
+        import json
+        import time
+        
+        # #region agent log - SHOT CHECK START
+        try:
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'E',
+                    'location': 'shot_detector.py:215',
+                    'message': 'shot_check_start',
+                    'data': {
+                        'frame': int(candidate.get('start_frame', 0)),
+                        'ball_end': ball_end_position.tolist() if hasattr(ball_end_position, 'tolist') else list(ball_end_position),
+                        'has_goals': self.left_goal_center is not None and self.right_goal_center is not None
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'run1'
+                }) + '\n')
+        except: pass
+        # #endregion
+        
         if self.left_goal_center is None or self.right_goal_center is None:
             # No goal positions - can't detect shots
             return False, 0.0, None
@@ -227,13 +262,47 @@ class ShotDetector:
         # Check 1: Ball ends near goal (not near a player)
         is_near_goal, _ = self._is_ball_near_goal(ball_end_position)
         
-        # Check distance to nearest player
+        # Check distance to nearest player - IMPORTANT: if ball ends near a player, it's a pass, not a shot
         min_player_distance = float('inf')
+        closest_player_id = None
         for player_id, player_pos in player_positions.items():
             if player_pos is None:
                 continue
             dist = np.linalg.norm(ball_end_position - player_pos)
-            min_player_distance = min(min_player_distance, dist)
+            if dist < min_player_distance:
+                min_player_distance = dist
+                closest_player_id = player_id
+        
+        # CRITICAL: Check if ball ends near the RECEIVER player (the "to_player" in the candidate)
+        # If the ball ends within possession radius of the receiver, it's definitely a pass, not a shot
+        # UNLESS: the receiver is on a different team (interception) AND ball is near goal (could be saved shot)
+        # If to_player is None, this is a shot candidate (no receiver - ball goes to goal)
+        receiver_player_id = candidate.get('to_player')
+        receiver_team_id = candidate.get('to_team')
+        from_team_id = candidate.get('from_team')
+        receiver_is_near = False
+        receiver_is_same_team = False
+        
+        # If no receiver (to_player is None), this is likely a shot
+        has_no_receiver = receiver_player_id is None
+        if has_no_receiver:
+            # No receiver - ball goes to goal, not to a player
+            # This is a STRONG indicator of a shot - give significant confidence boost
+            pass  # Continue to shot detection logic (will boost confidence later)
+        elif receiver_player_id in player_positions:
+            receiver_pos = player_positions[receiver_player_id]
+            if receiver_pos is not None:
+                receiver_distance = np.linalg.norm(ball_end_position - receiver_pos)
+                possession_radius = 400.0  # Match pass detector's effective radius
+                receiver_is_near = receiver_distance < possession_radius
+                # Check if receiver is on same team
+                if receiver_team_id is not None and from_team_id is not None:
+                    receiver_is_same_team = receiver_team_id == from_team_id
+        
+        # If ball ends very close to a player (within possession radius), it's definitely a pass, not a shot
+        # Use the same effective radius as pass detector (300 base + 100 tolerance = 400)
+        possession_radius = 400.0  # Match pass detector's effective radius
+        is_near_player = min_player_distance < possession_radius
         
         # If ball is closer to goal than to any player, likely a shot
         player_vs_goal = min_player_distance > goal_distance
@@ -262,27 +331,200 @@ class ShotDetector:
         # Check 4: Distance (shots are usually longer than short passes)
         is_long_enough = distance >= self.config['min_shot_distance']
         
-        # Calculate confidence score
+        # Check for strong shot indicators (trajectory + speed)
+        strong_trajectory = trajectory_similarity >= 0.7
+        high_speed = speed >= 400.0
+        
+        # #region agent log - SHOT CHECK INTERMEDIATE VALUES
+        try:
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'E',
+                    'location': 'shot_detector.py:306',
+                    'message': 'shot_check_intermediate',
+                    'data': {
+                        'frame': int(candidate.get('start_frame', 0)),
+                        'is_near_goal': bool(is_near_goal),
+                        'goal_distance': float(goal_distance),
+                        'min_player_distance': float(min_player_distance),
+                        'receiver_is_near': bool(receiver_is_near),
+                        'receiver_is_same_team': bool(receiver_is_same_team),
+                        'is_near_player': bool(is_near_player),
+                        'player_vs_goal': bool(player_vs_goal),
+                        'trajectory_similarity': float(trajectory_similarity),
+                        'speed': float(speed),
+                        'is_fast_enough': bool(is_fast_enough),
+                        'distance': float(distance),
+                        'is_long_enough': bool(is_long_enough)
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'run1'
+                }) + '\n')
+        except: pass
+        # #endregion
+        
+        # CRITICAL: If ball ends near the RECEIVER player, it's a pass, not a shot
+        # The ONLY exception: receiver is on different team (interception) AND ball is near goal (saved shot)
+        if receiver_is_near:
+            if receiver_is_same_team:
+                # Ball ended near receiver on same team - this is ALWAYS a pass, not a shot
+                # #region agent log - REJECTED: RECEIVER SAME TEAM
+                try:
+                    with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({
+                            'hypothesisId': 'E',
+                            'location': 'shot_detector.py:374',
+                            'message': 'rejected_receiver_same_team',
+                            'data': {'frame': int(candidate.get('start_frame', 0)), 'trajectory_similarity': float(trajectory_similarity), 'speed': float(speed), 'is_near_goal': bool(is_near_goal)},
+                            'timestamp': int(time.time() * 1000),
+                            'sessionId': 'debug-session',
+                            'runId': 'run1'
+                        }) + '\n')
+                except: pass
+                # #endregion
+                return False, 0.0, goal_center
+            else:
+                # Receiver is on different team (interception)
+                # Consider it a shot if ball is near goal OR if trajectory/speed are strong
+                if not is_near_goal and not (strong_trajectory and high_speed):
+                    # Ball is not near goal and weak trajectory/speed - this is just an interception, not a shot
+                    # #region agent log - REJECTED: INTERCEPTION NOT NEAR GOAL
+                    try:
+                        with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                'hypothesisId': 'E',
+                                'location': 'shot_detector.py:393',
+                                'message': 'rejected_interception_not_near_goal',
+                                'data': {'frame': int(candidate.get('start_frame', 0)), 'goal_distance': float(goal_distance), 'trajectory_similarity': float(trajectory_similarity), 'speed': float(speed)},
+                                'timestamp': int(time.time() * 1000),
+                                'sessionId': 'debug-session',
+                                'runId': 'run1'
+                            }) + '\n')
+                    except: pass
+                    # #endregion
+                    return False, 0.0, goal_center
+        
+        # If receiver is on different team (interception) AND ball is near goal, it's likely a shot
+        # (even if receiver is nearby - they might have saved/blocked it)
+        if receiver_is_near and not receiver_is_same_team and is_near_goal:
+            # This is an interception near the goal - likely a saved/blocked shot
+            # Give it a boost to be detected as a shot
+            pass  # Continue to confidence calculation with boost
+        
+        # CRITICAL: If ball ends near a player (within possession radius), check if it's still a shot
+        # Allow shots even if near player IF:
+        # 1. Strong trajectory toward goal (similarity > 0.7) AND high speed (>400 px/s), OR
+        # 2. Ball is near goal (could be saved/blocked shot)
+        if is_near_player and not (receiver_is_near and not receiver_is_same_team and is_near_goal):
+            # Ball is near a player, but not an interception near goal
+            # Check if it might still be a shot based on trajectory/speed or goal proximity
+            if is_near_goal:
+                # Ball is near goal - might be a shot even if near player (saved/blocked)
+                pass  # Continue to confidence calculation
+            elif strong_trajectory and high_speed:
+                # Strong trajectory and high speed - might be a shot even if not near goal
+                pass  # Continue to confidence calculation
+            else:
+                # Ball is near a player but not near goal and weak trajectory/speed
+                # This is likely a pass, not a shot
+                # #region agent log - REJECTED: NEAR PLAYER NOT NEAR GOAL
+                try:
+                    with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({
+                            'hypothesisId': 'E',
+                            'location': 'shot_detector.py:420',
+                            'message': 'rejected_near_player_not_near_goal',
+                            'data': {'frame': int(candidate.get('start_frame', 0)), 'min_player_distance': float(min_player_distance), 'goal_distance': float(goal_distance), 'trajectory_similarity': float(trajectory_similarity), 'speed': float(speed)},
+                            'timestamp': int(time.time() * 1000),
+                            'sessionId': 'debug-session',
+                            'runId': 'run1'
+                        }) + '\n')
+                except: pass
+                # #endregion
+                return False, 0.0, goal_center
+        
+        # Calculate confidence score - ADAPTIVE and MORE LENIENT
         confidence = 0.0
         
         # High confidence if ball ends at goal
         if is_near_goal:
-            confidence += 0.4
+            confidence += 0.4  # Base confidence for near goal
+            # Extra boost if very close to goal (adaptive threshold based on frame width)
+            close_threshold = self.config.get('frame_width', 1920) * 0.1  # 10% of frame width
+            if goal_distance < close_threshold:
+                confidence += 0.2
         
-        # High confidence if trajectory points toward goal
+        # High confidence if trajectory points toward goal (more lenient)
         if trajectory_similarity >= self.config['goal_direction_threshold']:
             confidence += 0.3
+        elif trajectory_similarity >= 0.1:  # Very lenient threshold
+            confidence += 0.1
         
         # Medium confidence if ball is closer to goal than players
         if player_vs_goal:
             confidence += 0.2
         
-        # Medium confidence if fast enough
+        # Medium confidence if fast enough (lowered threshold)
         if is_fast_enough:
             confidence += 0.1
+        elif speed >= self.config['min_shot_speed'] * 0.5:  # Half speed still counts
+            confidence += 0.05
         
-        # Shot detected if confidence is high enough
-        is_shot = confidence >= 0.5
+        # If ball is near goal and near a player, it might be a saved/blocked shot
+        if is_near_goal and is_near_player:
+            confidence += 0.1
+        
+        # Extra boost for interceptions near goal (saved/blocked shots)
+        if receiver_is_near and not receiver_is_same_team and is_near_goal:
+            confidence += 0.3  # Strong boost for saved shots
+        
+        # MAJOR boost for shots with no receiver (ball goes to goal, not to a player)
+        if has_no_receiver:
+            confidence += 0.3  # Strong boost - no receiver is a key indicator of a shot
+            # If ball is also closer to goal than to any player, even stronger
+            if player_vs_goal:
+                confidence += 0.2  # Extra boost
+        
+        # ADAPTIVE threshold: Lower for shots with no receiver, lower for interceptions near goal
+        if has_no_receiver:
+            # No receiver - ball goes to goal - this is a strong shot indicator
+            # Use lower threshold since no receiver is already a strong signal
+            is_shot = confidence >= 0.5  # Lower threshold for shots with no receiver
+            threshold_used = 0.5
+        elif receiver_is_near and not receiver_is_same_team and is_near_goal:
+            # Interception near goal - likely a saved/blocked shot
+            is_shot = confidence >= 0.5  # Moderate threshold for saved shots
+            threshold_used = 0.5
+        elif is_near_goal:
+            # Ball near goal - stricter threshold to avoid false positives
+            is_shot = confidence >= 0.65  # Higher threshold
+            threshold_used = 0.65
+        else:
+            # Regular shot detection
+            is_shot = confidence >= 0.7  # High threshold for shots far from goal
+            threshold_used = 0.7
+        
+        # #region agent log - SHOT CHECK RESULT
+        try:
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'E',
+                    'location': 'shot_detector.py:383',
+                    'message': 'shot_check_final_result',
+                    'data': {
+                        'frame': int(candidate.get('start_frame', 0)),
+                        'is_shot': bool(is_shot),
+                        'confidence': float(confidence),
+                        'threshold_used': float(threshold_used),
+                        'goal_center': goal_center.tolist() if goal_center is not None else None
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'run1'
+                }) + '\n')
+        except: pass
+        # #endregion
         
         return is_shot, confidence, goal_center
     
