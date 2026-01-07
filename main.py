@@ -528,7 +528,8 @@ if __name__ == "__main__":
     pipeline = CompleteSoccerAnalysisPipeline(model_path, keypoint_model_path)
     
     # Use the Drogba goal video
-    video_path = "/home/essashah/smo_model_new/drogba_goal_playable.mp4"
+    video_path = "/home/essashah/smo_model_new/youtube_shots_l3V5P1Sj6qI.mp4"
+
     
     # Process all frames in the trimmed video
     output_video = pipeline.analyze_video(video_path, frame_count=-1)    
