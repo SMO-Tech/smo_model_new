@@ -155,20 +155,33 @@ class AnnotatorManager:
 
     def annotate_ball(self, frame: np.ndarray, ball_detections: sv.Detections) -> np.ndarray:
         """
-        Annotate ball detections on frame using triangle (pointing upward).
+        Annotate ball detections on frame using triangle (pointing upward) with tracker ID.
 
         Args:
             frame: Input video frame
             ball_detections: Ball detection results
 
         Returns:
-            Annotated frame with ball triangle annotations
+            Annotated frame with ball triangle annotations and tracker ID
         """
         if ball_detections is None or len(ball_detections.xyxy) == 0:
             return frame
         
-        # Use triangle annotator for ball (triangle pointing upward)
-        return self.triangle_annotator.annotate(frame, ball_detections)
+        # Ensure tracker_id exists - ALWAYS use 0 for ball (since there's only one ball)
+        if ball_detections.tracker_id is None:
+            ball_detections.tracker_id = np.array([0] * len(ball_detections.xyxy))
+        else:
+            # Force all tracker_ids to 0 (in case old tracks have different IDs)
+            ball_detections.tracker_id = np.array([0] * len(ball_detections.xyxy))
+        
+        # Draw bounding box for ball (like players)
+        annotated_frame = self.box_annotator.annotate(frame, ball_detections)
+        
+        # Add tracker ID label (like players)
+        ball_labels = [f'Ball #{tracker_id}' for tracker_id in ball_detections.tracker_id]
+        annotated_frame = self.label_annotator.annotate(annotated_frame, detections=ball_detections, labels=ball_labels)
+        
+        return annotated_frame
 
     def annotate_all(self, frame: np.ndarray, player_detections, ball_detections, referee_detections) -> np.ndarray:
         """
@@ -274,7 +287,7 @@ class AnnotatorManager:
 
         return frame
 
-    def convert_tracks_to_detections(self, player_tracks, ball_tracks, referee_tracks, player_classids=None):
+    def convert_tracks_to_detections(self, player_tracks, ball_tracks, referee_tracks, player_classids=None, ball_tracker_id=None):
         """
         Convert tracking data back to supervision detections format.
 
@@ -283,6 +296,7 @@ class AnnotatorManager:
             ball_tracks: Ball tracking data for a frame [x1, y1, x2, y2] or None
             referee_tracks: Referee tracking data for a frame
             player_classids: Player class ID data for a frame (optional)
+            ball_tracker_id: Ball tracker ID for this frame (optional)
 
         Returns:
             Tuple of converted detection objects (player_detections, ball_detections, referee_detections)
@@ -307,10 +321,14 @@ class AnnotatorManager:
         # Convert ball tracks to detections
         if ball_tracks is not None and len(ball_tracks) == 4 and ball_tracks[0] is not None:
             # ball_tracks is [x1, y1, x2, y2]
+            # ALWAYS assign tracker_id 0 for ball (since there's only one ball and TrackNet handles temporal consistency)
+            # Ignore any stored tracker_id from old tracks - force it to 0
+            tracker_id_array = np.array([0])
             ball_detections = sv.Detections(
                 xyxy=np.array([[ball_tracks[0], ball_tracks[1], ball_tracks[2], ball_tracks[3]]]),
                 class_id=np.array([1]),  # Ball class ID
-                confidence=np.array([1.0])  # Default confidence
+                confidence=np.array([1.0]),  # Default confidence
+                tracker_id=tracker_id_array
             )
         else:
             ball_detections = None

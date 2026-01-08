@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_DIR))
 
@@ -19,14 +19,21 @@ import csv
 class CompleteSoccerAnalysisPipeline:
     """Complete end-to-end soccer analysis pipeline integrating all functionalities."""
     
-    def __init__(self, detection_model_path: str, keypoint_model_path: str):
+    def __init__(self, detection_model_path: str, keypoint_model_path: str, 
+                 tracknet_model_path: Optional[str] = None, use_tracknet: bool = False):
         """Initialize all pipeline components.
         
         Args:
             detection_model_path: Path to YOLO detection model
             keypoint_model_path: Path to YOLO keypoint detection model
+            tracknet_model_path: Optional path to TrackNet model weights for ball detection
+            use_tracknet: Whether to use TrackNet for ball detection (instead of YOLO)
         """
-        self.detection_pipeline = DetectionPipeline(detection_model_path)
+        self.detection_pipeline = DetectionPipeline(
+            detection_model_path, 
+            tracknet_model_path=tracknet_model_path,
+            use_tracknet=use_tracknet
+        )
         self.keypoint_pipeline = KeypointPipeline(keypoint_model_path)
         self.tracking_pipeline = TrackingPipeline(detection_model_path)
         self.tactical_pipeline = TacticalPipeline(keypoint_model_path, detection_model_path)
@@ -103,7 +110,7 @@ class CompleteSoccerAnalysisPipeline:
         # Step 4: Process all frames with detections, tracking, and tactical analysis
         print("\n[Step 4/8] Processing frames with complete analysis...")
         tactical_frames = []
-        all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}}
+        all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}, 'ball_tracker_ids': {}}
         
         # Batch process embeddings for faster UMAP transform (batch size = 30 frames for better GPU utilization)
         BATCH_SIZE = 30
@@ -117,7 +124,7 @@ class CompleteSoccerAnalysisPipeline:
             
             # Update with tracking (both players and ball)
             player_detections = self.tracking_pipeline.tracking_callback(player_detections)
-            ball_detections = self.tracking_pipeline.ball_tracking_callback(ball_detections)
+            ball_detections = self.tracking_pipeline.ball_tracking_callback(ball_detections, frame_idx=i)
 
             # Extract crops for team assignment (but batch process UMAP for 23x speedup)
             if len(player_detections.xyxy) > 0:
@@ -599,10 +606,22 @@ class CompleteSoccerAnalysisPipeline:
 if __name__ == "__main__":
     # Run Complete End-to-End Soccer Analysis Pipeline
     print("Starting Soccer Analysis...")
-    pipeline = CompleteSoccerAnalysisPipeline(model_path, keypoint_model_path)
+    
+    # TrackNet model path (disabled - using YOLO for ball detection instead)
+    # TrackNet was designed for badminton/tennis, not football, so YOLO works better
+    tracknet_model_path = str(PROJECT_DIR / "Models" / "Pretrained" / "TrackNet" / "tracknet_weights.pth")
+    
+    # Initialize pipeline with YOLO for ball detection (TrackNet disabled)
+    # YOLO model is already trained for football and works better than TrackNet
+    pipeline = CompleteSoccerAnalysisPipeline(
+        detection_model_path=model_path,
+        keypoint_model_path=keypoint_model_path,
+        tracknet_model_path=tracknet_model_path,
+        use_tracknet=False  # Use YOLO for ball detection (trained for football)
+    )
     
     # Use the new test video
-    video_path = "/home/essashah/SWE/08fd33_0.mp4"
+    video_path = "/home/essashah/SWE/soccer_video_2k.mp4"
 
     
     # Process all frames in the trimmed video

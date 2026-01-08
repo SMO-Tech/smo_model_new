@@ -22,19 +22,38 @@ import supervision as sv
 class DetectionPipeline:
     """
     Modular pipeline for running object detection on various input sources.
+    Supports both YOLO and TrackNet for ball detection.
     """
     
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, tracknet_model_path: Optional[str] = None, use_tracknet: bool = False):
         """
         Initialize detection pipeline.
         
         Args:
             model_path: Path to YOLO detection model
+            tracknet_model_path: Optional path to TrackNet model weights
+            use_tracknet: Whether to use TrackNet for ball detection (instead of YOLO)
         """
         self.model_path = model_path
         self.model = None
+        self.tracknet_detector = None
+        self.use_tracknet = use_tracknet
         self.annotator_manager = AnnotatorManager()
         self.processing_pipeline = ProcessingPipeline()
+        
+        # Initialize TrackNet if requested
+        if use_tracknet:
+            try:
+                from ball_tracking import create_tracknet_detector
+                self.tracknet_detector = create_tracknet_detector(
+                    model_path=tracknet_model_path,
+                    input_size=(640, 360)  # Standard TrackNet input size
+                )
+                print("✓ TrackNet detector initialized")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize TrackNet: {e}")
+                print("   Falling back to YOLO for ball detection")
+                self.use_tracknet = False
         
     def initialize_model(self):
         """
@@ -58,7 +77,9 @@ class DetectionPipeline:
         if self.model is None:
             self.initialize_model()
         
-        return get_detections(self.model, frame)
+        # Use TrackNet for ball detection if enabled, otherwise use YOLO
+        tracknet_detector = self.tracknet_detector if self.use_tracknet else None
+        return get_detections(self.model, frame, tracknet_detector=tracknet_detector)
     
     def annotate_detections(self, frame: np.ndarray, player_detections: sv.Detections, 
                           referee_detections: sv.Detections) -> np.ndarray:

@@ -381,12 +381,12 @@ class SimplePassDetector:
                                 'min_possession_frames': int(self.config['min_possession_frames']),
                                 'meets_min_frames': self.possession_frames >= self.config['min_possession_frames']
                             },
-                            'timestamp': int(time.time() * 1000),
+                                'timestamp': int(time.time() * 1000),
                             'sessionId': 'debug-session',
                             'runId': 'run1'
-                        }) + '\n')
+                            }) + '\n')
                 except: pass
-                # #endregion
+                    # #endregion
                 
                 # Track near-miss duration (old threshold vs new)
                 if 5 <= self.possession_frames < 10:

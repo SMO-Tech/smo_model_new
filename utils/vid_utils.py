@@ -56,7 +56,7 @@ def read_video(vid_path, frame_count=300):
 
 def write_video(frames, out_path, fps=30):
     """This function writes the frames to a video file using ffmpeg for H.264 encoding"""
-    
+
     height, width, _ = frames[0].shape
     
     # Use ffmpeg for proper H.264 encoding (much better compatibility than OpenCV's VideoWriter)

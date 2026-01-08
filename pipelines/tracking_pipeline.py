@@ -43,6 +43,9 @@ class TrackingPipeline:
         self.ball_tracker_manager = None  # Separate tracker for ball
         self.clustering_manager = None
         self.annotator_manager = None
+        # Track last ball position for temporal consistency filtering
+        self.last_ball_position = None
+        self.last_ball_frame = None
         
     def initialize_models(self):
         """Initialize all models required for the pipeline."""
@@ -57,9 +60,11 @@ class TrackingPipeline:
         print("Initializing player tracker...")
         self.tracker_manager = TrackerManager()
         
-        # Initialize separate tracker for ball (with higher match threshold for consistency)
+        # Initialize separate tracker for ball (with lower match threshold for lenient tracking)
         print("Initializing ball tracker...")
-        self.ball_tracker_manager = TrackerManager(match_thresh=0.6, track_buffer=60)
+        self.ball_tracker_manager = TrackerManager(match_thresh=0.3, track_buffer=120)
+        # Store last known ball tracker_id for consistency
+        self.last_ball_tracker_id = None
         
         # Initialize clustering manager
         print("Initializing clustering manager...")
@@ -161,36 +166,52 @@ class TrackingPipeline:
         """
         return self.tracker_manager.process_tracking_for_frame(player_detections)
     
-    def ball_tracking_callback(self, ball_detections):
+    def ball_tracking_callback(self, ball_detections, frame_idx=None):
         """
-        Tracking callback for updating ball tracks using ByteTrack.
-        This ensures consistent ball tracking across frames.
+        Assign consistent tracker ID to ball detections with temporal consistency filtering.
+        Filters out detections that jump too far from previous position (conservative tuning).
         
         Args:
-            ball_detections: Ball detection results
+            ball_detections: Ball detection results from YOLO
+            frame_idx: Current frame index (for temporal filtering)
             
         Returns:
-            Updated ball detections with tracking IDs (filtered to best detection)
+            Ball detections with consistent tracker_id (always 0 for the single ball)
         """
         if ball_detections is None or len(ball_detections.xyxy) == 0:
+            self.last_ball_position = None
             return ball_detections
         
-        # Track ball with ByteTrack
-        tracked_ball = self.ball_tracker_manager.update_player_detections(ball_detections)
-        
-        # If multiple detections, choose the one with the longest track (most consistent)
-        if len(tracked_ball.xyxy) > 1 and tracked_ball.tracker_id is not None:
-            # Filter to only active tracks (confidence > 0.5 if available)
-            if hasattr(tracked_ball, 'confidence') and tracked_ball.confidence is not None:
-                high_conf_mask = tracked_ball.confidence > 0.5
-                if high_conf_mask.any():
-                    tracked_ball = tracked_ball[high_conf_mask]
+        # Temporal consistency filter: reject detections that jump too far
+        # This helps prevent tracker from sticking to random objects on low quality videos
+        if self.last_ball_position is not None and frame_idx is not None:
+            # Calculate distance from last known position
+            current_center = np.array([
+                (ball_detections.xyxy[0][0] + ball_detections.xyxy[0][2]) / 2,
+                (ball_detections.xyxy[0][1] + ball_detections.xyxy[0][3]) / 2
+            ])
+            distance = np.linalg.norm(current_center - self.last_ball_position)
             
-            # If still multiple, take the first one (ByteTrack already filtered by consistency)
-            if len(tracked_ball.xyxy) > 1:
-                tracked_ball = tracked_ball[0:1]
+            # Conservative threshold: reject if ball jumps more than 300 pixels
+            # (allows for fast movement but filters out obvious false positives)
+            max_jump_distance = 300.0
+            if distance > max_jump_distance:
+                # Reject this detection - likely a false positive
+                self.last_ball_position = None
+                return sv.Detections.empty()
         
-        return tracked_ball
+        # Update last known position
+        if len(ball_detections.xyxy) > 0:
+            self.last_ball_position = np.array([
+                (ball_detections.xyxy[0][0] + ball_detections.xyxy[0][2]) / 2,
+                (ball_detections.xyxy[0][1] + ball_detections.xyxy[0][3]) / 2
+            ])
+            self.last_ball_frame = frame_idx
+        
+        # Assign fixed tracker_id (0) since there's only one ball
+        ball_detections.tracker_id = np.array([0])
+        
+        return ball_detections
     
     def clustering_callback(self, frame, player_detections):
         """
@@ -244,6 +265,14 @@ class TrackingPipeline:
         if len(ball_detections.xyxy) > 0:
             for bbox in ball_detections.xyxy:
                 tracks['ball'][index] = [bbox[0], bbox[1], bbox[2], bbox[3]]
+                # Always store ball tracker_id (default to 0 if not set, since there's only one ball)
+                if 'ball_tracker_ids' not in tracks:
+                    tracks['ball_tracker_ids'] = {}
+                if ball_detections.tracker_id is not None and len(ball_detections.tracker_id) > 0:
+                    tracks['ball_tracker_ids'][index] = int(ball_detections.tracker_id[0])
+                else:
+                    # Default to 0 if tracker_id not set (shouldn't happen, but safety fallback)
+                    tracks['ball_tracker_ids'][index] = 0
         else:
             tracks['ball'][index] = [None]*4
         
@@ -320,6 +349,7 @@ class TrackingPipeline:
             ball_tracks = tracks['ball'][index]
             referee_tracks = tracks['referee'][index]
             player_classids = tracks.get('player_classids', {}).get(index, None)
+            ball_tracker_id = tracks.get('ball_tracker_ids', {}).get(index, None)
             
             # Clean up invalid tracks
             if -1 in player_tracks:
@@ -329,10 +359,11 @@ class TrackingPipeline:
                 referee_tracks = None
             if (not all(ball_tracks)) or np.isnan(ball_tracks).all():
                 ball_tracks = None
+                ball_tracker_id = None
             
             # Convert to detections with stored class IDs
             player_detections, ball_detections, referee_detections = self.annotator_manager.convert_tracks_to_detections(
-                player_tracks, ball_tracks, referee_tracks, player_classids
+                player_tracks, ball_tracks, referee_tracks, player_classids, ball_tracker_id
             )
             
             # Annotate frame
