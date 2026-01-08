@@ -112,6 +112,7 @@ class SimplePassDetector:
         
         # Cooldowns
         self.player_cooldowns: Dict[int, int] = {}  # player_id -> end_frame
+        self.shot_cooldowns: Dict[int, int] = {}  # player_id -> end_frame (for shot deduplication)
         
         # Team map
         self.team_map: Dict[int, int] = {}
@@ -878,6 +879,23 @@ class SimplePassDetector:
             # #endregion
             
             if is_shot:
+                # Check shot cooldown to prevent duplicate shots from same player
+                # Use frame-based cooldown: prevent shots from same start_frame (same possession loss)
+                # This prevents duplicates from the same shot attempt, but allows different shots
+                shooter_id = candidate['from_player']
+                shot_start_frame = candidate['start_frame']
+                shot_cooldown_key = f"{shooter_id}_{shot_start_frame}"  # Unique per player+possession
+                
+                # Check if we already detected a shot from this exact possession (same start_frame)
+                if shot_cooldown_key in self.shot_cooldowns:
+                    # Already detected a shot from this possession - skip duplicate
+                    if len(self.pass_candidates) <= 10:
+                        print(f"   [SHOT REJECTED - Duplicate] Candidate #{i+1}: frame {candidate['start_frame']} (already detected from this possession)")
+                    continue
+                
+                # Mark this possession as having a detected shot
+                self.shot_cooldowns[shot_cooldown_key] = candidate['end_frame']
+                
                 # This is a shot, not a pass - create shot event
                 shot_event = self.shot_detector.create_shot_event(
                     candidate, ball_trajectory, goal_center, shot_confidence

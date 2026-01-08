@@ -601,8 +601,8 @@ if __name__ == "__main__":
     print("Starting Soccer Analysis...")
     pipeline = CompleteSoccerAnalysisPipeline(model_path, keypoint_model_path)
     
-    # Use the Drogba goal video
-    video_path = "/home/essashah/SWE/soccer_video_2k.mp4"
+    # Use the new test video
+    video_path = "/home/essashah/SWE/08fd33_0.mp4"
 
     
     # Process all frames in the trimmed video
