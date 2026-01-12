@@ -46,17 +46,17 @@ class SimplePassDetector:
     def __init__(self, config: Optional[Dict] = None):
         """Initialize the simple pass detector."""
         self.config = {
-            # Possession thresholds - IN PIXELS (MORE LENIENT FOR BETTER DETECTION)
-            'possession_radius': 300.0,    # Increased from 200 to 300 (catch more passes)
-            'possession_tolerance': 100.0,   # Tolerance margin: if ball is within this distance of radius, still consider in possession
-            'min_pass_distance': 50.0,     # Reduced from 80 to 50 (allow shorter passes)
-            'max_pass_distance': 1200.0,  # Increased from 800 to 1200 (allow longer passes)
+            # Possession thresholds - IN PIXELS (STRICTER TO REDUCE FALSE POSITIVES)
+            'possession_radius': 200.0,    # Reduced from 300 to 200 (stricter - reduce false positives)
+            'possession_tolerance': 80.0,   # Reduced from 100 to 80 (tighter control)
+            'min_pass_distance': 100.0,     # Increased from 50 to 100 (filter out very short movements)
+            'max_pass_distance': 1000.0,  # Reduced from 1200 to 1000 (more realistic max distance)
             
-            # Timing - MINIMUM for one-touch pass detection
-            'min_possession_frames': 1,    # Allow one-touch passes (was 5, reduced to 1)
-            'cooldown_frames': 15,         # Reduced from 60 to 15 (0.5s instead of 2s - allow rapid passes)
-            'min_pass_duration': 1,        # Allow one-touch passes (1 frame minimum, was 5)
-            'max_pass_duration_frames': 150,  # Increased from 120 to 150 (5 seconds max)
+            # Timing - STRICTER to reduce false positives
+            'min_possession_frames': 2,    # Increased from 1 to 2 (require brief possession)
+            'cooldown_frames': 30,         # Increased from 15 to 30 (1s cooldown - reduce rapid false positives)
+            'min_pass_duration': 2,        # Increased from 1 to 2 (require minimum 2 frames)
+            'max_pass_duration_frames': 120,  # Reduced from 150 to 120 (4 seconds max - more realistic)
             
             # Frame rate
             'fps': 30.0,
@@ -365,22 +365,22 @@ class SimplePassDetector:
             elif self.current_possession.player_id != closest_player:
                 # Possession change - potential pass
                 # #region agent log - POSSESSION CHANGE DETECTED
-                try:
+                    try:
                     with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
-                        f.write(json.dumps({
+                            f.write(json.dumps({
                             'hypothesisId': 'A,C',
                             'location': 'simple_pass_detector.py:287',
                             'message': 'possession_change_detected',
-                            'data': {
-                                'frame': int(frame),
-                                'from_player': int(self.current_possession.player_id),
-                                'to_player': int(closest_player),
+                                'data': {
+                                    'frame': int(frame),
+                                    'from_player': int(self.current_possession.player_id),
+                                    'to_player': int(closest_player),
                                 'from_team': int(self.current_possession.team_id),
                                 'to_team': int(team_id),
                                 'possession_frames': int(self.possession_frames),
                                 'min_possession_frames': int(self.config['min_possession_frames']),
                                 'meets_min_frames': self.possession_frames >= self.config['min_possession_frames']
-                            },
+                                },
                                 'timestamp': int(time.time() * 1000),
                             'sessionId': 'debug-session',
                             'runId': 'run1'

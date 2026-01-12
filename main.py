@@ -124,7 +124,8 @@ class CompleteSoccerAnalysisPipeline:
             
             # Update with tracking (both players and ball)
             player_detections = self.tracking_pipeline.tracking_callback(player_detections)
-            ball_detections = self.tracking_pipeline.ball_tracking_callback(ball_detections, frame_idx=i)
+            # Pass player_detections to ball tracking for proximity validation
+            ball_detections = self.tracking_pipeline.ball_tracking_callback(ball_detections, frame_idx=i, player_detections=player_detections)
 
             # Extract crops for team assignment (but batch process UMAP for 23x speedup)
             if len(player_detections.xyxy) > 0:
@@ -542,7 +543,7 @@ class CompleteSoccerAnalysisPipeline:
                 })
         
         return gaps
-    
+
     def _display_shots_and_passes_stats(self, passes: List, shots: List):
         """
         Display formatted statistics for shots and passes by team.

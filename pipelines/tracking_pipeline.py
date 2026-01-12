@@ -46,6 +46,10 @@ class TrackingPipeline:
         # Track last ball position for temporal consistency filtering
         self.last_ball_position = None
         self.last_ball_frame = None
+        # Motion prediction: track velocity and direction for better filtering
+        self.ball_velocity = None  # [vx, vy] in pixels per frame
+        self.ball_position_history = []  # Last 5 positions for motion validation
+        self.max_history = 5
         
     def initialize_models(self):
         """Initialize all models required for the pipeline."""
@@ -166,47 +170,156 @@ class TrackingPipeline:
         """
         return self.tracker_manager.process_tracking_for_frame(player_detections)
     
-    def ball_tracking_callback(self, ball_detections, frame_idx=None):
+    def ball_tracking_callback(self, ball_detections, frame_idx=None, player_detections=None):
         """
-        Assign consistent tracker ID to ball detections with temporal consistency filtering.
-        Filters out detections that jump too far from previous position (conservative tuning).
+        Assign consistent tracker ID to ball detections with advanced motion prediction.
+        Uses velocity-based prediction, direction consistency, and player proximity to prevent drift.
         
         Args:
             ball_detections: Ball detection results from YOLO
             frame_idx: Current frame index (for temporal filtering)
+            player_detections: Player detections for proximity validation
             
         Returns:
             Ball detections with consistent tracker_id (always 0 for the single ball)
         """
         if ball_detections is None or len(ball_detections.xyxy) == 0:
-            self.last_ball_position = None
+            # No detection - clear velocity if too many frames passed
+            if frame_idx is not None and self.last_ball_frame is not None:
+                frames_since_last = frame_idx - self.last_ball_frame
+                if frames_since_last > 10:  # If ball missing for >10 frames, reset
+                    self.ball_velocity = None
+                    self.ball_position_history = []
             return ball_detections
         
-        # Temporal consistency filter: reject detections that jump too far
-        # This helps prevent tracker from sticking to random objects on low quality videos
-        if self.last_ball_position is not None and frame_idx is not None:
-            # Calculate distance from last known position
-            current_center = np.array([
-                (ball_detections.xyxy[0][0] + ball_detections.xyxy[0][2]) / 2,
-                (ball_detections.xyxy[0][1] + ball_detections.xyxy[0][3]) / 2
-            ])
-            distance = np.linalg.norm(current_center - self.last_ball_position)
+        current_center = np.array([
+            (ball_detections.xyxy[0][0] + ball_detections.xyxy[0][2]) / 2,
+            (ball_detections.xyxy[0][1] + ball_detections.xyxy[0][3]) / 2
+        ])
+        conf = ball_detections.confidence[0] if ball_detections.confidence is not None and len(ball_detections.confidence) > 0 else 0.5
+        
+        # Validation 1: Player proximity check (ball should be near players)
+        if player_detections is not None and len(player_detections.xyxy) > 0:
+            player_centers = []
+            for player_bbox in player_detections.xyxy:
+                pc = np.array([
+                    (player_bbox[0] + player_bbox[2]) / 2,
+                    (player_bbox[1] + player_bbox[3]) / 2
+                ])
+                player_centers.append(pc)
             
-            # Conservative threshold: reject if ball jumps more than 300 pixels
-            # (allows for fast movement but filters out obvious false positives)
-            max_jump_distance = 300.0
-            if distance > max_jump_distance:
-                # Reject this detection - likely a false positive
-                self.last_ball_position = None
+            min_player_distance = min([np.linalg.norm(current_center - pc) for pc in player_centers])
+            # Stricter player proximity: ball must be within 250px of a player OR have very high confidence (>=0.6)
+            # This prevents drift to random objects far from players
+            if min_player_distance > 250.0 and conf < 0.6:
+                # Too far from players and low confidence - likely false positive
                 return sv.Detections.empty()
         
+        # Validation 2: Motion prediction and consistency
+        if self.last_ball_position is not None and frame_idx is not None:
+            frames_since_last = frame_idx - self.last_ball_frame if self.last_ball_frame is not None else 1
+            frames_since_last = max(1, frames_since_last)  # At least 1 frame
+            
+            # Calculate displacement
+            displacement = current_center - self.last_ball_position
+            distance = np.linalg.norm(displacement)
+            
+            # Predict position based on velocity
+            predicted_position = None
+            if self.ball_velocity is not None:
+                # Predict where ball should be based on velocity
+                predicted_position = self.last_ball_position + self.ball_velocity * frames_since_last
+                predicted_distance = np.linalg.norm(current_center - predicted_position)
+            else:
+                predicted_distance = float('inf')
+            
+            # Calculate current velocity
+            current_velocity = displacement / frames_since_last
+            
+            # Validation 3: Direction consistency (ball shouldn't suddenly reverse)
+            direction_consistent = True
+            if self.ball_velocity is not None and len(self.ball_position_history) >= 2:
+                # Check if direction changed dramatically (reversal)
+                prev_direction = self.ball_velocity / (np.linalg.norm(self.ball_velocity) + 1e-6)
+                current_direction = current_velocity / (np.linalg.norm(current_velocity) + 1e-6)
+                direction_similarity = np.dot(prev_direction, current_direction)
+                
+                # If direction similarity < -0.5, ball reversed direction (unlikely unless bounce)
+                # Only allow reversal if confidence is very high (>=0.5)
+                if direction_similarity < -0.5 and conf < 0.5:
+                    direction_consistent = False
+            
+            # Validation 4: Stricter distance thresholds (adaptive based on velocity and confidence)
+            if self.ball_velocity is not None:
+                # If we have velocity, use predicted position with stricter tolerance
+                velocity_magnitude = np.linalg.norm(self.ball_velocity)
+                max_distance = max(
+                    velocity_magnitude * frames_since_last * 1.8,  # Reduced from 2.5x to 1.8x - stricter
+                    150.0  # Reduced minimum threshold from 200px
+                )
+            else:
+                # No velocity history - use stricter confidence-based threshold
+                if conf >= 0.5:
+                    max_distance = 300.0  # Reduced from 400px
+                elif conf >= 0.35:
+                    max_distance = 250.0  # Reduced from 300px
+                else:
+                    max_distance = 150.0  # Reduced from 200px
+            
+            # Also check predicted distance if available - stricter tolerance
+            if predicted_position is not None:
+                # Stricter: only allow 1.5x prediction error (reduced from 2.0x)
+                max_distance = min(max_distance, predicted_distance * 1.5)
+            
+            # Reject if:
+            # 1. Distance too large
+            # 2. Direction inconsistent (unless high confidence)
+            # 3. Too far from predicted position (if we have prediction)
+            # 4. Additional check: if we have history, validate smoothness
+            if distance > max_distance:
+                return sv.Detections.empty()
+            
+            if not direction_consistent:
+                return sv.Detections.empty()
+            
+            if predicted_position is not None:
+                # Stricter: predicted distance must be within 60% of max_distance (reduced from 80%)
+                if predicted_distance > max_distance * 0.6:
+                    return sv.Detections.empty()
+            
+            # Additional validation: check smoothness with position history
+            if len(self.ball_position_history) >= 2:
+                # Calculate average velocity from history
+                recent_positions = np.array(self.ball_position_history[-3:])  # Last 3 positions
+                if len(recent_positions) >= 2:
+                    historical_velocities = np.diff(recent_positions, axis=0)
+                    avg_historical_velocity = np.mean(historical_velocities, axis=0)
+                    avg_velocity_magnitude = np.linalg.norm(avg_historical_velocity)
+                    
+                    # Current velocity should be similar to historical average
+                    # If current velocity is >3x different, likely a false positive
+                    if avg_velocity_magnitude > 0:
+                        velocity_ratio = np.linalg.norm(current_velocity) / avg_velocity_magnitude
+                        if velocity_ratio > 3.0 or velocity_ratio < 0.33:  # Too fast or too slow compared to history
+                            # Only accept if confidence is very high
+                            if conf < 0.6:
+                                return sv.Detections.empty()
+            
+            # Update velocity (exponential moving average for smoothness)
+            if self.ball_velocity is None:
+                self.ball_velocity = current_velocity
+            else:
+                # Smooth velocity update (0.7 weight on new, 0.3 on old)
+                self.ball_velocity = 0.7 * current_velocity + 0.3 * self.ball_velocity
+        
+        # Update position history
+        self.ball_position_history.append(current_center.copy())
+        if len(self.ball_position_history) > self.max_history:
+            self.ball_position_history.pop(0)
+        
         # Update last known position
-        if len(ball_detections.xyxy) > 0:
-            self.last_ball_position = np.array([
-                (ball_detections.xyxy[0][0] + ball_detections.xyxy[0][2]) / 2,
-                (ball_detections.xyxy[0][1] + ball_detections.xyxy[0][3]) / 2
-            ])
-            self.last_ball_frame = frame_idx
+        self.last_ball_position = current_center.copy()
+        self.last_ball_frame = frame_idx
         
         # Assign fixed tracker_id (0) since there's only one ball
         ball_detections.tracker_id = np.array([0])

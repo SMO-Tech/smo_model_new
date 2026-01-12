@@ -73,13 +73,14 @@ def load_detection_model(model_path: str) -> YOLO:
     return model
 
 
-def detect_objects_in_frames(model: YOLO, frames, device: str = None) -> List:
+def detect_objects_in_frames(model: YOLO, frames, device: str = None, conf: float = 0.25) -> List:
     """Detect objects in video frames using YOLO model with GPU acceleration.
     
     Args:
         model: Loaded YOLO model
         frames: Video frames or single frame
         device: Device to use for inference (auto-detected if None)
+        conf: Confidence threshold (default 0.25, lower for better detection on small objects)
         
     Returns:
         Detection results from YOLO model
@@ -88,15 +89,16 @@ def detect_objects_in_frames(model: YOLO, frames, device: str = None) -> List:
         device = get_device()
     
     # Use device parameter for inference with error handling
+    # Lower conf threshold helps detect small objects in Veo footage
     try:
         if device != 'cpu':
-            return model(frames, device=device)
+            return model(frames, device=device, conf=conf, verbose=False)
         else:
-            return model(frames, device='cpu')
+            return model(frames, device='cpu', conf=conf, verbose=False)
     except RuntimeError as e:
         if "no kernel image" in str(e) or "CUDA capability" in str(e):
             print(f"⚠️  GPU operation failed, retrying with CPU")
-            return model(frames, device='cpu')
+            return model(frames, device='cpu', conf=conf, verbose=False)
         raise
 
 def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = False,
@@ -116,7 +118,9 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
     
     def inference_callback(frame: np.ndarray) -> sv.Detections:
         """Convert YOLO results to supervision format."""
-        result = detect_objects_in_frames(detection_model, frame, device=device)[0]
+        # Lower confidence threshold for better detection on Veo footage (small objects)
+        # conf=0.15 allows more detections while still filtering obvious false positives
+        result = detect_objects_in_frames(detection_model, frame, device=device, conf=0.15)[0]
         return sv.Detections.from_ultralytics(result)
 
     # Get detections using slicer or direct inference
@@ -168,14 +172,23 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
         # Use YOLO for ball detection (original behavior)
         ball_detections = detections[detections.class_id == 1]
         
-        # Conservative filtering for lower quality videos:
-        # 1. Filter by confidence (only accept reasonably confident detections)
-        # 2. Filter by size (balls should be small, not too large)
+        # Smart multi-criteria filtering for Veo footage:
+        # Uses confidence + size + player proximity to balance detection rate with false positive rejection
         if len(ball_detections.xyxy) > 0:
             frame_h, frame_w = frame.shape[0], frame.shape[1]
             frame_area = frame_w * frame_h
             
-            # Filter detections
+            # Get player centers for proximity validation
+            player_centers = []
+            if len(player_detections.xyxy) > 0:
+                for player_bbox in player_detections.xyxy:
+                    player_center = np.array([
+                        (player_bbox[0] + player_bbox[2]) / 2,
+                        (player_bbox[1] + player_bbox[3]) / 2
+                    ])
+                    player_centers.append(player_center)
+            
+            # Filter detections using multi-criteria scoring
             valid_indices = []
             for i in range(len(ball_detections.xyxy)):
                 bbox = ball_detections.xyxy[i]
@@ -187,11 +200,31 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
                 bbox_area = bbox_w * bbox_h
                 bbox_area_ratio = bbox_area / frame_area
                 
-                # Conservative filters:
-                # 1. Minimum confidence: 0.3 (reject very low confidence detections)
-                # 2. Maximum size: 2% of frame area (reject very large detections - likely false positives)
-                # 3. Minimum size: 0.01% of frame area (reject extremely tiny detections)
-                if conf >= 0.3 and 0.0001 <= bbox_area_ratio <= 0.02:
+                # Ball center for proximity check
+                ball_center = np.array([
+                    (bbox[0] + bbox[2]) / 2,
+                    (bbox[1] + bbox[3]) / 2
+                ])
+                
+                # Multi-criteria validation:
+                # 1. Basic size/confidence check (lenient for Veo)
+                size_valid = 0.0000005 <= bbox_area_ratio <= 0.03
+                conf_valid = conf >= 0.15
+                
+                # 2. Player proximity validation (rejects isolated detections far from players)
+                # Ball should be reasonably close to at least one player (within 400px for Veo wide-angle)
+                # OR have high confidence (>=0.4) - high confidence detections are trusted even if isolated
+                player_proximity_valid = False
+                if len(player_centers) > 0:
+                    min_player_distance = min([np.linalg.norm(ball_center - pc) for pc in player_centers])
+                    # Accept if near a player (400px for wide-angle) OR high confidence
+                    player_proximity_valid = min_player_distance <= 400.0 or conf >= 0.4
+                else:
+                    # No players detected - only accept high confidence detections
+                    player_proximity_valid = conf >= 0.4
+                
+                # Accept if all criteria pass
+                if size_valid and conf_valid and player_proximity_valid:
                     valid_indices.append(i)
             
             # Keep only valid detections
