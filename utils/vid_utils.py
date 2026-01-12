@@ -71,7 +71,7 @@ def write_video(frames, out_path, fps=30):
     
     if not temp_writer.isOpened():
         # Fallback to XVID if mp4v fails
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
         temp_writer = cv2.VideoWriter(temp_input, fourcc, fps, (width, height))
         if not temp_writer.isOpened():
             raise RuntimeError(f"Failed to initialize temporary video writer")
