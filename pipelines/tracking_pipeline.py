@@ -5,6 +5,7 @@ sys.path.append(str(PROJECT_DIR))
 
 import numpy as np
 import time
+import json
 import supervision as sv
 from tqdm import tqdm
 
@@ -172,8 +173,8 @@ class TrackingPipeline:
     
     def ball_tracking_callback(self, ball_detections, frame_idx=None, player_detections=None):
         """
-        Assign consistent tracker ID to ball detections with advanced motion prediction.
-        Uses velocity-based prediction, direction consistency, and player proximity to prevent drift.
+        Assign consistent tracker ID to ball detections. Simplified to trust YOLO detections.
+        Uses minimal validation to prevent obvious false positives while accepting valid detections.
         
         Args:
             ball_detections: Ball detection results from YOLO
@@ -183,6 +184,27 @@ class TrackingPipeline:
         Returns:
             Ball detections with consistent tracker_id (always 0 for the single ball)
         """
+        # #region agent log - BALL TRACKING CALLBACK ENTRY
+        try:
+            import json
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'A',
+                    'location': 'tracking_pipeline.py:173',
+                    'message': 'ball_tracking_callback_entry',
+                    'data': {
+                        'frame': int(frame_idx) if frame_idx is not None else -1,
+                        'has_detections': ball_detections is not None and len(ball_detections.xyxy) > 0,
+                        'num_detections': len(ball_detections.xyxy) if ball_detections is not None else 0,
+                        'using_yolo': True  # Always using YOLO when use_tracknet=False
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'post-fix'
+                }) + '\n')
+        except: pass
+        # #endregion
+        
         if ball_detections is None or len(ball_detections.xyxy) == 0:
             # No detection - clear velocity if too many frames passed
             if frame_idx is not None and self.last_ball_frame is not None:
@@ -198,8 +220,11 @@ class TrackingPipeline:
         ])
         conf = ball_detections.confidence[0] if ball_detections.confidence is not None and len(ball_detections.confidence) > 0 else 0.5
         
-        # Validation 1: Player proximity check (ball should be near players)
-        if player_detections is not None and len(player_detections.xyxy) > 0:
+        # Simplified validation: Only reject obvious false positives
+        # Trust YOLO detections more - they're already filtered in detect_players.py
+        # Only apply very lenient player proximity check for very low confidence detections
+        if player_detections is not None and len(player_detections.xyxy) > 0 and conf < 0.25:
+            # Only check player proximity for very low confidence detections (<0.25)
             player_centers = []
             for player_bbox in player_detections.xyxy:
                 pc = np.array([
@@ -209,101 +234,62 @@ class TrackingPipeline:
                 player_centers.append(pc)
             
             min_player_distance = min([np.linalg.norm(current_center - pc) for pc in player_centers])
-            # Stricter player proximity: ball must be within 250px of a player OR have very high confidence (>=0.6)
-            # This prevents drift to random objects far from players
-            if min_player_distance > 250.0 and conf < 0.6:
-                # Too far from players and low confidence - likely false positive
+            # Very lenient: only reject if very far from players (>600px) AND very low confidence
+            if min_player_distance > 600.0:
+                # Too far from players and very low confidence - likely false positive
+                # #region agent log - BALL REJECTED
+                try:
+                    with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({
+                            'hypothesisId': 'A',
+                            'location': 'tracking_pipeline.py:214',
+                            'message': 'ball_rejected_proximity',
+                            'data': {
+                                'frame': int(frame_idx) if frame_idx is not None else -1,
+                                'confidence': float(conf),
+                                'min_player_distance': float(min_player_distance)
+                            },
+                            'timestamp': int(time.time() * 1000),
+                            'sessionId': 'debug-session',
+                            'runId': 'post-fix'
+                        }) + '\n')
+                except: pass
+                # #endregion
                 return sv.Detections.empty()
         
-        # Validation 2: Motion prediction and consistency
+        # Simplified motion tracking: Just update position and velocity, minimal validation
+        # Trust YOLO detections - they're already filtered in detect_players.py
         if self.last_ball_position is not None and frame_idx is not None:
             frames_since_last = frame_idx - self.last_ball_frame if self.last_ball_frame is not None else 1
             frames_since_last = max(1, frames_since_last)  # At least 1 frame
             
-            # Calculate displacement
+            # Calculate displacement and velocity
             displacement = current_center - self.last_ball_position
             distance = np.linalg.norm(displacement)
-            
-            # Predict position based on velocity
-            predicted_position = None
-            if self.ball_velocity is not None:
-                # Predict where ball should be based on velocity
-                predicted_position = self.last_ball_position + self.ball_velocity * frames_since_last
-                predicted_distance = np.linalg.norm(current_center - predicted_position)
-            else:
-                predicted_distance = float('inf')
-            
-            # Calculate current velocity
             current_velocity = displacement / frames_since_last
             
-            # Validation 3: Direction consistency (ball shouldn't suddenly reverse)
-            direction_consistent = True
-            if self.ball_velocity is not None and len(self.ball_position_history) >= 2:
-                # Check if direction changed dramatically (reversal)
-                prev_direction = self.ball_velocity / (np.linalg.norm(self.ball_velocity) + 1e-6)
-                current_direction = current_velocity / (np.linalg.norm(current_velocity) + 1e-6)
-                direction_similarity = np.dot(prev_direction, current_direction)
-                
-                # If direction similarity < -0.5, ball reversed direction (unlikely unless bounce)
-                # Only allow reversal if confidence is very high (>=0.5)
-                if direction_similarity < -0.5 and conf < 0.5:
-                    direction_consistent = False
-            
-            # Validation 4: Stricter distance thresholds (adaptive based on velocity and confidence)
-            if self.ball_velocity is not None:
-                # If we have velocity, use predicted position with stricter tolerance
-                velocity_magnitude = np.linalg.norm(self.ball_velocity)
-                max_distance = max(
-                    velocity_magnitude * frames_since_last * 1.8,  # Reduced from 2.5x to 1.8x - stricter
-                    150.0  # Reduced minimum threshold from 200px
-                )
-            else:
-                # No velocity history - use stricter confidence-based threshold
-                if conf >= 0.5:
-                    max_distance = 300.0  # Reduced from 400px
-                elif conf >= 0.35:
-                    max_distance = 250.0  # Reduced from 300px
-                else:
-                    max_distance = 150.0  # Reduced from 200px
-            
-            # Also check predicted distance if available - stricter tolerance
-            if predicted_position is not None:
-                # Stricter: only allow 1.5x prediction error (reduced from 2.0x)
-                max_distance = min(max_distance, predicted_distance * 1.5)
-            
-            # Reject if:
-            # 1. Distance too large
-            # 2. Direction inconsistent (unless high confidence)
-            # 3. Too far from predicted position (if we have prediction)
-            # 4. Additional check: if we have history, validate smoothness
-            if distance > max_distance:
+            # Only reject if distance is impossibly large (e.g., >2000px in one frame)
+            # This catches obvious false positives while allowing fast ball movement
+            if distance > 2000.0 and conf < 0.3:
+                # #region agent log - BALL REJECTED DISTANCE
+                try:
+                    with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({
+                            'hypothesisId': 'A',
+                            'location': 'tracking_pipeline.py:260',
+                            'message': 'ball_rejected_distance',
+                            'data': {
+                                'frame': int(frame_idx) if frame_idx is not None else -1,
+                                'distance': float(distance),
+                                'confidence': float(conf)
+                            },
+                            'timestamp': int(time.time() * 1000),
+                            'sessionId': 'debug-session',
+                            'runId': 'post-fix'
+                        }) + '\n')
+                except: pass
+                # #endregion
                 return sv.Detections.empty()
-            
-            if not direction_consistent:
-                return sv.Detections.empty()
-            
-            if predicted_position is not None:
-                # Stricter: predicted distance must be within 60% of max_distance (reduced from 80%)
-                if predicted_distance > max_distance * 0.6:
-                    return sv.Detections.empty()
-            
-            # Additional validation: check smoothness with position history
-            if len(self.ball_position_history) >= 2:
-                # Calculate average velocity from history
-                recent_positions = np.array(self.ball_position_history[-3:])  # Last 3 positions
-                if len(recent_positions) >= 2:
-                    historical_velocities = np.diff(recent_positions, axis=0)
-                    avg_historical_velocity = np.mean(historical_velocities, axis=0)
-                    avg_velocity_magnitude = np.linalg.norm(avg_historical_velocity)
-                    
-                    # Current velocity should be similar to historical average
-                    # If current velocity is >3x different, likely a false positive
-                    if avg_velocity_magnitude > 0:
-                        velocity_ratio = np.linalg.norm(current_velocity) / avg_velocity_magnitude
-                        if velocity_ratio > 3.0 or velocity_ratio < 0.33:  # Too fast or too slow compared to history
-                            # Only accept if confidence is very high
-                            if conf < 0.6:
-                                return sv.Detections.empty()
             
             # Update velocity (exponential moving average for smoothness)
             if self.ball_velocity is None:

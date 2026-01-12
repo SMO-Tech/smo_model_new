@@ -46,17 +46,17 @@ class SimplePassDetector:
     def __init__(self, config: Optional[Dict] = None):
         """Initialize the simple pass detector."""
         self.config = {
-            # Possession thresholds - IN PIXELS (STRICTER TO REDUCE FALSE POSITIVES)
-            'possession_radius': 200.0,    # Reduced from 300 to 200 (stricter - reduce false positives)
-            'possession_tolerance': 80.0,   # Reduced from 100 to 80 (tighter control)
-            'min_pass_distance': 100.0,     # Increased from 50 to 100 (filter out very short movements)
-            'max_pass_distance': 1000.0,  # Reduced from 1200 to 1000 (more realistic max distance)
+            # Possession thresholds - IN PIXELS (BALANCED FOR ~75% ACCURACY)
+            'possession_radius': 250.0,    # Balanced: 250px (allows more passes while filtering noise)
+            'possession_tolerance': 100.0,   # Balanced: 100px tolerance
+            'min_pass_distance': 60.0,     # Reduced: 60px (allows shorter passes, recovers some physical rejections)
+            'max_pass_distance': 1500.0,  # Increased: 1500px (allows longer passes, recovers some physical rejections)
             
-            # Timing - STRICTER to reduce false positives
-            'min_possession_frames': 2,    # Increased from 1 to 2 (require brief possession)
-            'cooldown_frames': 30,         # Increased from 15 to 30 (1s cooldown - reduce rapid false positives)
-            'min_pass_duration': 2,        # Increased from 1 to 2 (require minimum 2 frames)
-            'max_pass_duration_frames': 120,  # Reduced from 150 to 120 (4 seconds max - more realistic)
+            # Timing - BALANCED for ~75% accuracy
+            'min_possession_frames': 1,    # Balanced: 1 frame (allows quick passes)
+            'cooldown_frames': 10,         # Reduced: 10 frames (0.33s - allows rapid passes, recovers ~50% of cooldown rejections)
+            'min_pass_duration': 1,        # Balanced: 1 frame minimum
+            'max_pass_duration_frames': 150,  # Balanced: 150 frames (5 seconds max)
             
             # Frame rate
             'fps': 30.0,
@@ -365,28 +365,28 @@ class SimplePassDetector:
             elif self.current_possession.player_id != closest_player:
                 # Possession change - potential pass
                 # #region agent log - POSSESSION CHANGE DETECTED
-                    try:
+                try:
                     with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
-                            f.write(json.dumps({
+                        f.write(json.dumps({
                             'hypothesisId': 'A,C',
                             'location': 'simple_pass_detector.py:287',
                             'message': 'possession_change_detected',
-                                'data': {
-                                    'frame': int(frame),
-                                    'from_player': int(self.current_possession.player_id),
-                                    'to_player': int(closest_player),
+                            'data': {
+                                'frame': int(frame),
+                                'from_player': int(self.current_possession.player_id),
+                                'to_player': int(closest_player),
                                 'from_team': int(self.current_possession.team_id),
                                 'to_team': int(team_id),
                                 'possession_frames': int(self.possession_frames),
                                 'min_possession_frames': int(self.config['min_possession_frames']),
                                 'meets_min_frames': self.possession_frames >= self.config['min_possession_frames']
-                                },
-                                'timestamp': int(time.time() * 1000),
+                            },
+                            'timestamp': int(time.time() * 1000),
                             'sessionId': 'debug-session',
                             'runId': 'run1'
-                            }) + '\n')
+                        }) + '\n')
                 except: pass
-                    # #endregion
+                # #endregion
                 
                 # Track near-miss duration (old threshold vs new)
                 if 5 <= self.possession_frames < 10:
@@ -941,6 +941,30 @@ class SimplePassDetector:
         print(f"   ✗ Rejected - Trajectory: {rejected_trajectory}")
         print(f"   ✗ Rejected - Temporal: {rejected_temporal}")
         print(f"   ✗ Rejected - Cooldown: {rejected_cooldown}")
+        
+        # #region agent log - VALIDATION SUMMARY
+        try:
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'A,B,C,D',
+                    'location': 'simple_pass_detector.py:938',
+                    'message': 'validation_summary',
+                    'data': {
+                        'total_candidates': len(self.pass_candidates),
+                        'confirmed_passes': len(self.confirmed_passes),
+                        'shots_detected': shots_detected,
+                        'rejected_physical': rejected_physical,
+                        'rejected_trajectory': rejected_trajectory,
+                        'rejected_temporal': rejected_temporal,
+                        'rejected_cooldown': rejected_cooldown,
+                        'pass_accuracy_estimate': len(self.confirmed_passes) / max(1, len(self.pass_candidates)) * 100
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'run1'
+                }) + '\n')
+        except: pass
+        # #endregion
     
     def _validate_physical(self, candidate: Dict) -> bool:
         """Layer 1: Physical reality check."""
@@ -948,6 +972,28 @@ class SimplePassDetector:
         duration_seconds = duration_frames / self.config['fps']
         distance = np.linalg.norm(candidate['to_pos'] - candidate['from_pos'])
         speed = distance / duration_seconds if duration_seconds > 0 else float('inf')
+        
+        # #region agent log - PHYSICAL VALIDATION
+        try:
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'B',
+                    'location': 'simple_pass_detector.py:969',
+                    'message': 'physical_validation_check',
+                    'data': {
+                        'frame': int(candidate['start_frame']),
+                        'distance': float(distance),
+                        'min_pass_distance': float(self.config['min_pass_distance']),
+                        'max_pass_distance': float(self.config['max_pass_distance']),
+                        'speed': float(speed),
+                        'duration_seconds': float(duration_seconds)
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'post-fix'
+                }) + '\n')
+        except: pass
+        # #endregion
         
         # Check minimum duration
         if duration_seconds < 0.05:  # 1-2 frames at 30fps

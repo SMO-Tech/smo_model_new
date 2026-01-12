@@ -621,8 +621,8 @@ if __name__ == "__main__":
         use_tracknet=False  # Use YOLO for ball detection (trained for football)
     )
     
-    # Use the new test video
-    video_path = "/home/essashah/SWE/soccer_video_2k.mp4"
+    # Use the new high-quality YouTube video (1080p)
+    video_path = "/home/essashah/SWE/youtube_video_agGnUcKUzxU_1080p.mp4"
 
     
     # Process all frames in the trimmed video

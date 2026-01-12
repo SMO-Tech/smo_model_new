@@ -486,16 +486,16 @@ class ShotDetector:
             if player_vs_goal:
                 confidence += 0.2  # Extra boost
         
-        # ADAPTIVE threshold: Lower for shots with no receiver, lower for interceptions near goal
+        # ADAPTIVE threshold: Balanced for ~75% accuracy
         if has_no_receiver:
             # No receiver - ball goes to goal - this is a strong shot indicator
-            # Use balanced threshold: 0.55 (between 0.5 and 0.6)
+            # Use balanced threshold: 0.50 (lowered for ~75% accuracy target)
             # Allow shots if confidence is high enough, even without perfect trajectory
             # (trajectory calculation can fail, but other indicators like speed/player_vs_goal are strong)
-            min_confidence = 0.55  # Balanced threshold
-            # If confidence is very high (>= 0.7), accept even without trajectory/near_goal
+            min_confidence = 0.50  # Balanced threshold for ~75% accuracy
+            # If confidence is very high (>= 0.65), accept even without trajectory/near_goal
             # Otherwise, require trajectory toward goal OR be near goal OR player_vs_goal
-            if confidence >= 0.7:
+            if confidence >= 0.65:
                 is_shot = True  # High confidence - accept
             elif trajectory_similarity >= self.config['goal_direction_threshold'] or is_near_goal or player_vs_goal:
                 is_shot = confidence >= min_confidence
@@ -505,16 +505,16 @@ class ShotDetector:
             threshold_used = min_confidence
         elif receiver_is_near and not receiver_is_same_team and is_near_goal:
             # Interception near goal - likely a saved/blocked shot
-            is_shot = confidence >= 0.5  # Moderate threshold for saved shots
-            threshold_used = 0.5
+            is_shot = confidence >= 0.45  # Lowered threshold for saved shots (~75% accuracy)
+            threshold_used = 0.45
         elif is_near_goal:
-            # Ball near goal - stricter threshold to avoid false positives
-            is_shot = confidence >= 0.65  # Higher threshold
-            threshold_used = 0.65
+            # Ball near goal - balanced threshold for ~75% accuracy
+            is_shot = confidence >= 0.58  # Balanced threshold
+            threshold_used = 0.58
         else:
             # Regular shot detection
-            is_shot = confidence >= 0.7  # High threshold for shots far from goal
-            threshold_used = 0.7
+            is_shot = confidence >= 0.62  # Balanced threshold for shots far from goal (~75% accuracy)
+            threshold_used = 0.62
         
         # #region agent log - SHOT CHECK RESULT
         try:

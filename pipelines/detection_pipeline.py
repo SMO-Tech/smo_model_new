@@ -79,6 +79,27 @@ class DetectionPipeline:
         
         # Use TrackNet for ball detection if enabled, otherwise use YOLO
         tracknet_detector = self.tracknet_detector if self.use_tracknet else None
+        
+        # #region agent log - DETECTION METHOD
+        try:
+            import json
+            import time
+            with open('/home/essashah/SWE/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'hypothesisId': 'A',
+                    'location': 'detection_pipeline.py:81',
+                    'message': 'detection_method',
+                    'data': {
+                        'using_tracknet': self.use_tracknet,
+                        'using_yolo': not self.use_tracknet
+                    },
+                    'timestamp': int(time.time() * 1000),
+                    'sessionId': 'debug-session',
+                    'runId': 'post-fix'
+                }) + '\n')
+        except: pass
+        # #endregion
+        
         return get_detections(self.model, frame, tracknet_detector=tracknet_detector)
     
     def annotate_detections(self, frame: np.ndarray, player_detections: sv.Detections, 
