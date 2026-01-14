@@ -150,8 +150,13 @@ class EmbeddingExtractor:
                             print(f"  Batch {batch_idx+1}/{total_batches} on {current_device}")
                         inputs = self.processor(images=batch, return_tensors="pt").to(current_device)
                         outputs = self.model(**inputs)
-                        embeddings = torch.mean(outputs.last_hidden_state, dim=1).cpu().numpy()
-                        data.append(embeddings)
+                        embeddings = torch.mean(outputs.last_hidden_state, dim=1)
+                        # Keep on GPU if using cuML (GPU-accelerated clustering), otherwise move to CPU
+                        if current_device != 'cpu':
+                            # Keep as tensor on GPU - will convert to numpy only when needed
+                            data.append(embeddings)
+                        else:
+                            data.append(embeddings.cpu().numpy())
                         
                         # Clear GPU cache periodically
                         if batch_idx % 20 == 0 and current_device != 'cpu':
@@ -189,7 +194,15 @@ class EmbeddingExtractor:
                         
             if len(data) == 0:
                 raise ValueError("No embeddings extracted from batches")
-            data = np.concatenate(data, axis=0)
+            
+            # Convert tensors to numpy if needed (for CPU or if cuML not available)
+            if isinstance(data[0], torch.Tensor):
+                # All are tensors - concatenate on GPU then move to CPU
+                data = torch.cat(data, dim=0).cpu().numpy()
+            else:
+                # All are numpy arrays - concatenate normally
+                data = np.concatenate(data, axis=0)
+            
             # Only print for large batches to avoid spam during frame processing
             if len(data) > 100:
                 print(f"✅ Successfully extracted {len(data)} embeddings")

@@ -5,7 +5,7 @@ sys.path.append(str(PROJECT_DIR))
 
 import pandas as pd
 import numpy as np
-from utils import read_video, write_video
+from utils import read_video, write_video, read_video_chunked
 
 
 class ProcessingPipeline:
@@ -17,18 +17,22 @@ class ProcessingPipeline:
         pass
     
     @staticmethod
-    def read_video_frames(video_path, frame_count=-1):
+    def read_video_frames(video_path, frame_count=-1, chunk_size=None):
         """
         Read video frames from a file.
         
         Args:
             video_path: Path to the video file
             frame_count: Number of frames to read (-1 for all frames)
+            chunk_size: If provided, returns a generator for chunked reading (for large videos)
             
         Returns:
-            List of video frames
+            List of video frames (if chunk_size=None) or generator of chunks
         """
         print(f"Reading video from {video_path}...")
+        if chunk_size is not None:
+            return read_video_chunked(video_path, chunk_size=chunk_size, frame_count=frame_count)
+        else:
         frames = read_video(video_path, frame_count=frame_count)
         return frames
     

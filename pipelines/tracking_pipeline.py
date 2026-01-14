@@ -428,13 +428,14 @@ class TrackingPipeline:
         
         return tracks
     
-    def annotate_frames(self, frames, tracks):
+    def annotate_frames(self, frames, tracks, frame_offset=0):
         """
         Annotate video frames with tracking and team assignment results.
         
         Args:
             frames: List of video frames
             tracks: Tracking results dictionary
+            frame_offset: Offset to add to frame indices (for chunked processing)
             
         Returns:
             List of annotated frames
@@ -442,13 +443,14 @@ class TrackingPipeline:
         print("Annotating frames...")
         annotated_frames = []
         
-        for index, frame in tqdm(enumerate(frames), total=len(frames)):
+        for local_index, frame in tqdm(enumerate(frames), total=len(frames)):
+            frame_index = frame_offset + local_index  # Adjust for chunk offset
             # Get tracks for this frame
-            player_tracks = tracks['player'][index]
-            ball_tracks = tracks['ball'][index]
-            referee_tracks = tracks['referee'][index]
-            player_classids = tracks.get('player_classids', {}).get(index, None)
-            ball_tracker_id = tracks.get('ball_tracker_ids', {}).get(index, None)
+            player_tracks = tracks['player'].get(frame_index, [])
+            ball_tracks = tracks['ball'].get(frame_index, [])
+            referee_tracks = tracks['referee'].get(frame_index, [])
+            player_classids = tracks.get('player_classids', {}).get(frame_index, None)
+            ball_tracker_id = tracks.get('ball_tracker_ids', {}).get(frame_index, None)
             
             # Clean up invalid tracks
             if -1 in player_tracks:

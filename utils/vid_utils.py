@@ -54,6 +54,71 @@ def read_video(vid_path, frame_count=300):
     return frames
 
 
+def read_video_chunked(vid_path, chunk_size=5000, frame_count=-1):
+    """Read video in chunks to avoid loading all frames into memory.
+    
+    Args:
+        vid_path: Path to video file
+        chunk_size: Number of frames per chunk (default 5000)
+        frame_count: Total frames to read (-1 for all)
+        
+    Yields:
+        Tuple of (chunk_frames, start_idx, end_idx)
+    """
+    cap = cv2.VideoCapture(vid_path)
+    
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {vid_path}")
+    
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    if frame_count == -1:
+        frames_to_read = total_frames
+    else:
+        frames_to_read = min(frame_count, total_frames)
+    
+    print(f"Reading video in chunks: {total_frames} total frames (~{total_frames/fps:.1f} seconds)")
+    print(f"Chunk size: {chunk_size} frames")
+    
+    chunk_frames = []
+    counter = 0
+    chunk_start = 0
+    last_progress_time = __import__('time').time()
+    
+    while cap.isOpened() and counter < frames_to_read:
+        success, frame = cap.read()
+        
+        if not success:
+            break
+        
+        chunk_frames.append(frame)
+        counter += 1
+        
+        # Progress logging
+        current_time = __import__('time').time()
+        if counter % 100 == 0 or (current_time - last_progress_time) >= 2.0:
+            progress_pct = (counter / frames_to_read * 100) if frames_to_read > 0 else 0
+            print(f"  Reading video: {counter}/{frames_to_read} frames ({progress_pct:.1f}%)", end='\r')
+            last_progress_time = current_time
+        
+        # Yield chunk when full or at end
+        if len(chunk_frames) >= chunk_size or counter >= frames_to_read:
+            chunk_end = chunk_start + len(chunk_frames)
+            yield chunk_frames, chunk_start, chunk_end
+            chunk_start = chunk_end
+            chunk_frames = []  # Clear chunk to free memory
+    
+    # Yield remaining frames
+    if len(chunk_frames) > 0:
+        chunk_end = chunk_start + len(chunk_frames)
+        yield chunk_frames, chunk_start, chunk_end
+    
+    cap.release()
+    cv2.destroyAllWindows()
+    print(f"\n✅ Finished reading video")
+
+
 def write_video(frames, out_path, fps=30):
     """This function writes the frames to a video file using ffmpeg for H.264 encoding"""
 
@@ -71,7 +136,7 @@ def write_video(frames, out_path, fps=30):
     
     if not temp_writer.isOpened():
         # Fallback to XVID if mp4v fails
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
         temp_writer = cv2.VideoWriter(temp_input, fourcc, fps, (width, height))
         if not temp_writer.isOpened():
             raise RuntimeError(f"Failed to initialize temporary video writer")

@@ -71,7 +71,7 @@ TRAINING_FRAME_LIMIT = 120 * 24   # Maximum frames for training (120*24 = ~2 min
 
 # Clustering parameters  
 
-EMBEDDING_BATCH_SIZE = 256        # Batch size for SigLIP embedding extraction (optimized for Tesla T4 15GB)
+EMBEDDING_BATCH_SIZE = 1024       # Maximum batch size for SigLIP embedding extraction (maximize GPU utilization on Tesla T4 15GB)
 UMAP_COMPONENTS = 3               # UMAP dimensionality reduction components
 N_TEAMS = 2                       # Number of teams to cluster (usually 2)
 
