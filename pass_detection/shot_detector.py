@@ -72,14 +72,14 @@ class ShotDetector:
             'goal_area_tolerance': 400.0,  # Pixels - how close ball must be to goal (adaptive, scales with resolution)
             'goal_area_tolerance_ratio': 0.25,  # Ratio of frame width - adaptive tolerance based on video size (balanced to catch shots but not passes)
             
-            # Shot detection thresholds - ADAPTIVE
-            'min_shot_speed': 200.0,  # pixels/second - shots are faster than passes (lowered for better detection)
-            'min_shot_distance': 50.0,  # pixels - minimum distance for a shot (lowered)
-            'max_shot_distance': 3000.0,  # pixels - maximum realistic shot distance (increased)
+            # Shot detection thresholds - TUNED FOR 65%+ ACCURACY (IDEALLY 7-8 OUT OF 10)
+            'min_shot_speed': 180.0,  # pixels/second - lowered to catch slower shots
+            'min_shot_distance': 40.0,  # pixels - lowered to catch shorter shots
+            'max_shot_distance': 3200.0,  # pixels - increased for longer shots
             
-            # Trajectory analysis - MORE LENIENT
-            'goal_direction_threshold': 0.3,  # Cosine similarity - lowered from 0.7 for better detection
-            'min_trajectory_frames': 2,  # Minimum frames for trajectory analysis (reduced)
+            # Trajectory analysis - TUNED FOR BETTER ACCURACY
+            'goal_direction_threshold': 0.25,  # Cosine similarity - lowered for better recall
+            'min_trajectory_frames': 2,  # Keep: 2 frames minimum
             
             # Frame rate
             'fps': 30.0,
@@ -141,6 +141,59 @@ class ShotDetector:
         """Set goal positions from keypoint detection or manual calibration."""
         self.left_goal_center = left_goal.copy()
         self.right_goal_center = right_goal.copy()
+    
+    def set_goal_positions_from_keypoints(self, keypoints: np.ndarray, field_corners: Optional[Dict[str, Tuple[float, float]]] = None):
+        """
+        Set goal positions from keypoint detection.
+        
+        Uses goal area keypoints (small rectangles) to determine goal positions.
+        """
+        if keypoints is None or keypoints.size == 0:
+            return
+        
+        # Goal area keypoints (small rectangles)
+        # Left goal area: keypoints 5, 6, 7, 8
+        # Right goal area: keypoints 21, 22, 23, 24
+        
+        if keypoints.shape[0] > 0:
+            kpts = keypoints[0]  # First detection
+            
+            # Left goal (from goal area keypoints)
+            left_goal_points = []
+            for kpt_idx in [5, 6, 7, 8]:
+                if kpt_idx < kpts.shape[0] and kpts[kpt_idx, 2] > 0.5:  # Confidence > 0.5
+                    left_goal_points.append([kpts[kpt_idx, 0], kpts[kpt_idx, 1]])
+            
+            if len(left_goal_points) >= 2:
+                left_goal_points = np.array(left_goal_points)
+                # Goal center is average of goal area points
+                self.left_goal_center = np.mean(left_goal_points, axis=0).astype(np.float32)
+            elif field_corners and 'top_left' in field_corners and 'bottom_left' in field_corners:
+                # Fallback: use corners
+                top_left = np.array(field_corners['top_left'])
+                bottom_left = np.array(field_corners['bottom_left'])
+                self.left_goal_center = ((top_left + bottom_left) / 2.0).astype(np.float32)
+            
+            # Right goal (from goal area keypoints)
+            right_goal_points = []
+            for kpt_idx in [21, 22, 23, 24]:
+                if kpt_idx < kpts.shape[0] and kpts[kpt_idx, 2] > 0.5:  # Confidence > 0.5
+                    right_goal_points.append([kpts[kpt_idx, 0], kpts[kpt_idx, 1]])
+            
+            if len(right_goal_points) >= 2:
+                right_goal_points = np.array(right_goal_points)
+                # Goal center is average of goal area points
+                self.right_goal_center = np.mean(right_goal_points, axis=0).astype(np.float32)
+            elif field_corners and 'top_right' in field_corners and 'bottom_right' in field_corners:
+                # Fallback: use corners
+                top_right = np.array(field_corners['top_right'])
+                bottom_right = np.array(field_corners['bottom_right'])
+                self.right_goal_center = ((top_right + bottom_right) / 2.0).astype(np.float32)
+            
+            if self.left_goal_center is not None and self.right_goal_center is not None:
+                print(f"[Shot Detector] Set goal positions from keypoints:")
+                print(f"  Left goal: ({self.left_goal_center[0]:.1f}, {self.left_goal_center[1]:.1f})")
+                print(f"  Right goal: ({self.right_goal_center[0]:.1f}, {self.right_goal_center[1]:.1f})")
     
     def _get_closest_goal(self, position: np.ndarray) -> Tuple[Optional[np.ndarray], float]:
         """
@@ -486,16 +539,14 @@ class ShotDetector:
             if player_vs_goal:
                 confidence += 0.2  # Extra boost
         
-        # ADAPTIVE threshold: Balanced for ~75% accuracy
+        # TUNED threshold: For 65%+ accuracy (ideally 7-8 out of 10)
         if has_no_receiver:
             # No receiver - ball goes to goal - this is a strong shot indicator
-            # Use balanced threshold: 0.50 (lowered for ~75% accuracy target)
-            # Allow shots if confidence is high enough, even without perfect trajectory
-            # (trajectory calculation can fail, but other indicators like speed/player_vs_goal are strong)
-            min_confidence = 0.50  # Balanced threshold for ~75% accuracy
-            # If confidence is very high (>= 0.65), accept even without trajectory/near_goal
+            # Use tuned threshold: 0.45 (lowered for 65%+ accuracy target)
+            min_confidence = 0.45  # Tuned threshold for 65%+ accuracy
+            # If confidence is very high (>= 0.60), accept even without trajectory/near_goal
             # Otherwise, require trajectory toward goal OR be near goal OR player_vs_goal
-            if confidence >= 0.65:
+            if confidence >= 0.60:
                 is_shot = True  # High confidence - accept
             elif trajectory_similarity >= self.config['goal_direction_threshold'] or is_near_goal or player_vs_goal:
                 is_shot = confidence >= min_confidence
@@ -505,16 +556,16 @@ class ShotDetector:
             threshold_used = min_confidence
         elif receiver_is_near and not receiver_is_same_team and is_near_goal:
             # Interception near goal - likely a saved/blocked shot
-            is_shot = confidence >= 0.45  # Lowered threshold for saved shots (~75% accuracy)
-            threshold_used = 0.45
+            is_shot = confidence >= 0.40  # Lowered threshold for saved shots (65%+ accuracy)
+            threshold_used = 0.40
         elif is_near_goal:
-            # Ball near goal - balanced threshold for ~75% accuracy
-            is_shot = confidence >= 0.58  # Balanced threshold
-            threshold_used = 0.58
+            # Ball near goal - tuned threshold for 65%+ accuracy
+            is_shot = confidence >= 0.52  # Tuned threshold
+            threshold_used = 0.52
         else:
             # Regular shot detection
-            is_shot = confidence >= 0.62  # Balanced threshold for shots far from goal (~75% accuracy)
-            threshold_used = 0.62
+            is_shot = confidence >= 0.55  # Tuned threshold for shots far from goal (65%+ accuracy)
+            threshold_used = 0.55
         
         # #region agent log - SHOT CHECK RESULT
         try:

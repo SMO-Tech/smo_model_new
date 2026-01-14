@@ -46,17 +46,17 @@ class SimplePassDetector:
     def __init__(self, config: Optional[Dict] = None):
         """Initialize the simple pass detector."""
         self.config = {
-            # Possession thresholds - IN PIXELS (BALANCED FOR ~75% ACCURACY)
-            'possession_radius': 250.0,    # Balanced: 250px (allows more passes while filtering noise)
-            'possession_tolerance': 100.0,   # Balanced: 100px tolerance
-            'min_pass_distance': 60.0,     # Reduced: 60px (allows shorter passes, recovers some physical rejections)
-            'max_pass_distance': 1500.0,  # Increased: 1500px (allows longer passes, recovers some physical rejections)
+            # Possession thresholds - IN PIXELS (TUNED FOR 65%+ ACCURACY, IDEALLY 7-8 OUT OF 10)
+            'possession_radius': 270.0,    # Increased: 270px (catches more passes while filtering noise)
+            'possession_tolerance': 110.0,   # Increased: 110px tolerance (more lenient)
+            'min_pass_distance': 50.0,     # Reduced: 50px (allows very short passes)
+            'max_pass_distance': 1600.0,  # Increased: 1600px (allows longer passes)
             
-            # Timing - BALANCED for ~75% accuracy
-            'min_possession_frames': 1,    # Balanced: 1 frame (allows quick passes)
-            'cooldown_frames': 10,         # Reduced: 10 frames (0.33s - allows rapid passes, recovers ~50% of cooldown rejections)
-            'min_pass_duration': 1,        # Balanced: 1 frame minimum
-            'max_pass_duration_frames': 150,  # Balanced: 150 frames (5 seconds max)
+            # Timing - TUNED for 65%+ accuracy (ideally 7-8 out of 10)
+            'min_possession_frames': 1,    # Keep: 1 frame (allows quick passes)
+            'cooldown_frames': 8,         # Reduced: 8 frames (0.27s - allows more rapid passes)
+            'min_pass_duration': 1,        # Keep: 1 frame minimum
+            'max_pass_duration_frames': 150,  # Keep: 150 frames (5 seconds max)
             
             # Frame rate
             'fps': 30.0,
@@ -77,12 +77,12 @@ class SimplePassDetector:
             # Speed thresholds (for fast passes)
             'max_speed_pixels_per_frame': 80,  # Increased from 50 to 80 for very fast passes
             
-            # Dynamic radius (MORE LENIENT)
+            # Dynamic radius (TUNED FOR BETTER ACCURACY)
             'dynamic_radius_enabled': True,  # Enable dynamic possession radius
-            'base_radius': 300.0,  # Increased from 200 to 300
-            'speed_factor': 2.5,  # Increased from 2.0 to 2.5
-            'min_radius': 250.0,  # Increased from 150 to 250
-            'max_radius': 500.0,  # Increased from 350 to 500
+            'base_radius': 310.0,  # Increased: 310px (catches more passes)
+            'speed_factor': 2.6,  # Increased: 2.6 (more lenient for fast passes)
+            'min_radius': 260.0,  # Increased: 260px (more lenient minimum)
+            'max_radius': 520.0,  # Increased: 520px (allows wider range)
         }
         
         if config:

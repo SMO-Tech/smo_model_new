@@ -101,15 +101,13 @@ def detect_objects_in_frames(model: YOLO, frames, device: str = None, conf: floa
             return model(frames, device='cpu', conf=conf, verbose=False)
         raise
 
-def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = False,
-                   tracknet_detector=None) -> Tuple[sv.Detections, sv.Detections, sv.Detections]:
+def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = False) -> Tuple[sv.Detections, sv.Detections, sv.Detections]:
     """Get separated detections for players, ball, and referees with GPU acceleration.
     
     Args:
         detection_model: Loaded YOLO model
         frame: Input frame as numpy array
         use_slicer: Whether to use inference slicer for large images
-        tracknet_detector: Optional TrackNet detector for ball detection (if None, uses YOLO)
         
     Returns:
         Tuple of (player_detections, ball_detections, referee_detections)
@@ -134,103 +132,68 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
     player_detections = detections[detections.class_id == 0]
     referee_detections = detections[detections.class_id == 2]
     
-    # Ball detection: Use TrackNet if provided, otherwise use YOLO
-    if tracknet_detector is not None:
-        # Use TrackNet for ball detection
-        ball_position = tracknet_detector.detect_ball(frame)
-        if ball_position is not None and len(ball_position) >= 2:
-            # Convert TrackNet position to supervision Detections format
-            # Create a visible bounding box around the detected position
-            x, y = float(ball_position[0]), float(ball_position[1])
-            frame_h, frame_w = frame.shape[0], frame.shape[1]
-            
-            # Ensure coordinates are within frame bounds
-            x = max(0, min(x, frame_w - 1))
-            y = max(0, min(y, frame_h - 1))
-            
-            # Create a larger bounding box for better visibility (like YOLO would)
-            box_size = 40  # Larger box for better visibility
-            x1 = max(0, x - box_size)
-            y1 = max(0, y - box_size)
-            x2 = min(frame_w, x + box_size)
-            y2 = min(frame_h, y + box_size)
-            
-            # Only create detection if box is valid
-            if x2 > x1 and y2 > y1 and (x2 - x1) >= 10 and (y2 - y1) >= 10:
-                xyxy = np.array([[x1, y1, x2, y2]], dtype=np.float32)
-                ball_detections = sv.Detections(
-                    xyxy=xyxy,
-                    confidence=np.array([0.95]),  # High confidence for TrackNet
-                    class_id=np.array([1])  # Ball class ID
-                )
-            else:
-                ball_detections = sv.Detections.empty()
-        else:
-            # No ball detected
-            ball_detections = sv.Detections.empty()
-    else:
-        # Use YOLO for ball detection (original behavior)
-        ball_detections = detections[detections.class_id == 1]
+    # Ball detection using YOLO
+    ball_detections = detections[detections.class_id == 1]
+    
+    # Smart multi-criteria filtering for Veo footage:
+    # Uses confidence + size + player proximity to balance detection rate with false positive rejection
+    if len(ball_detections.xyxy) > 0:
+        frame_h, frame_w = frame.shape[0], frame.shape[1]
+        frame_area = frame_w * frame_h
         
-        # Smart multi-criteria filtering for Veo footage:
-        # Uses confidence + size + player proximity to balance detection rate with false positive rejection
-        if len(ball_detections.xyxy) > 0:
-            frame_h, frame_w = frame.shape[0], frame.shape[1]
-            frame_area = frame_w * frame_h
-            
-            # Get player centers for proximity validation
-            player_centers = []
-            if len(player_detections.xyxy) > 0:
-                for player_bbox in player_detections.xyxy:
-                    player_center = np.array([
-                        (player_bbox[0] + player_bbox[2]) / 2,
-                        (player_bbox[1] + player_bbox[3]) / 2
-                    ])
-                    player_centers.append(player_center)
-            
-            # Filter detections using multi-criteria scoring
-            valid_indices = []
-            for i in range(len(ball_detections.xyxy)):
-                bbox = ball_detections.xyxy[i]
-                conf = ball_detections.confidence[i] if ball_detections.confidence is not None and len(ball_detections.confidence) > i else 0.5
-                
-                # Calculate bounding box size
-                bbox_w = bbox[2] - bbox[0]
-                bbox_h = bbox[3] - bbox[1]
-                bbox_area = bbox_w * bbox_h
-                bbox_area_ratio = bbox_area / frame_area
-                
-                # Ball center for proximity check
-                ball_center = np.array([
-                    (bbox[0] + bbox[2]) / 2,
-                    (bbox[1] + bbox[3]) / 2
+        # Get player centers for proximity validation
+        player_centers = []
+        if len(player_detections.xyxy) > 0:
+            for player_bbox in player_detections.xyxy:
+                player_center = np.array([
+                    (player_bbox[0] + player_bbox[2]) / 2,
+                    (player_bbox[1] + player_bbox[3]) / 2
                 ])
-                
-                # Multi-criteria validation:
-                # 1. Basic size/confidence check (lenient for Veo)
-                size_valid = 0.0000005 <= bbox_area_ratio <= 0.03
-                conf_valid = conf >= 0.15
-                
-                # 2. Player proximity validation (rejects isolated detections far from players)
-                # Ball should be reasonably close to at least one player (within 400px for Veo wide-angle)
-                # OR have high confidence (>=0.4) - high confidence detections are trusted even if isolated
-                player_proximity_valid = False
-                if len(player_centers) > 0:
-                    min_player_distance = min([np.linalg.norm(ball_center - pc) for pc in player_centers])
-                    # Accept if near a player (400px for wide-angle) OR high confidence
-                    player_proximity_valid = min_player_distance <= 400.0 or conf >= 0.4
-                else:
-                    # No players detected - only accept high confidence detections
-                    player_proximity_valid = conf >= 0.4
-                
-                # Accept if all criteria pass
-                if size_valid and conf_valid and player_proximity_valid:
-                    valid_indices.append(i)
+                player_centers.append(player_center)
+        
+        # Filter detections using multi-criteria scoring
+        valid_indices = []
+        for i in range(len(ball_detections.xyxy)):
+            bbox = ball_detections.xyxy[i]
+            conf = ball_detections.confidence[i] if ball_detections.confidence is not None and len(ball_detections.confidence) > i else 0.5
             
-            # Keep only valid detections
-            if len(valid_indices) > 0:
-                ball_detections = ball_detections[valid_indices]
+            # Calculate bounding box size
+            bbox_w = bbox[2] - bbox[0]
+            bbox_h = bbox[3] - bbox[1]
+            bbox_area = bbox_w * bbox_h
+            bbox_area_ratio = bbox_area / frame_area
+            
+            # Ball center for proximity check
+            ball_center = np.array([
+                (bbox[0] + bbox[2]) / 2,
+                (bbox[1] + bbox[3]) / 2
+            ])
+            
+            # Multi-criteria validation:
+            # 1. Basic size/confidence check (lenient for Veo)
+            size_valid = 0.0000005 <= bbox_area_ratio <= 0.03
+            conf_valid = conf >= 0.15
+            
+            # 2. Player proximity validation (rejects isolated detections far from players)
+            # Ball should be reasonably close to at least one player (within 400px for Veo wide-angle)
+            # OR have high confidence (>=0.4) - high confidence detections are trusted even if isolated
+            player_proximity_valid = False
+            if len(player_centers) > 0:
+                min_player_distance = min([np.linalg.norm(ball_center - pc) for pc in player_centers])
+                # Accept if near a player (400px for wide-angle) OR high confidence
+                player_proximity_valid = min_player_distance <= 400.0 or conf >= 0.4
             else:
-                ball_detections = sv.Detections.empty()
+                # No players detected - only accept high confidence detections
+                player_proximity_valid = conf >= 0.4
+            
+            # Accept if all criteria pass
+            if size_valid and conf_valid and player_proximity_valid:
+                valid_indices.append(i)
+        
+        # Keep only valid detections
+        if len(valid_indices) > 0:
+            ball_detections = ball_detections[valid_indices]
+        else:
+            ball_detections = sv.Detections.empty()
 
     return player_detections, ball_detections, referee_detections

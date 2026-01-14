@@ -1,13 +1,13 @@
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_DIR))
 
 from pipelines import TrackingPipeline, ProcessingPipeline, DetectionPipeline, KeypointPipeline, TacticalPipeline
 from constants import model_path, test_video, EMBEDDING_BATCH_SIZE
 from keypoint_detection.keypoint_constants import keypoint_model_path
-from pass_detection.simple_pass_detector import SimplePassDetector
+from pass_detection.event_detector import EventDetector, AllEvents
 import numpy as np
 import time
 from tqdm import tqdm
@@ -19,26 +19,19 @@ import csv
 class CompleteSoccerAnalysisPipeline:
     """Complete end-to-end soccer analysis pipeline integrating all functionalities."""
     
-    def __init__(self, detection_model_path: str, keypoint_model_path: str, 
-                 tracknet_model_path: Optional[str] = None, use_tracknet: bool = False):
+    def __init__(self, detection_model_path: str, keypoint_model_path: str):
         """Initialize all pipeline components.
         
         Args:
             detection_model_path: Path to YOLO detection model
             keypoint_model_path: Path to YOLO keypoint detection model
-            tracknet_model_path: Optional path to TrackNet model weights for ball detection
-            use_tracknet: Whether to use TrackNet for ball detection (instead of YOLO)
         """
-        self.detection_pipeline = DetectionPipeline(
-            detection_model_path, 
-            tracknet_model_path=tracknet_model_path,
-            use_tracknet=use_tracknet
-        )
+        self.detection_pipeline = DetectionPipeline(detection_model_path)
         self.keypoint_pipeline = KeypointPipeline(keypoint_model_path)
         self.tracking_pipeline = TrackingPipeline(detection_model_path)
         self.tactical_pipeline = TacticalPipeline(keypoint_model_path, detection_model_path)
         self.processing_pipeline = ProcessingPipeline()
-        self.pass_detector = None  # Will be initialized with video FPS
+        self.event_detector = None  # Will be initialized with video FPS
         self.video_fps = 30.0  # Default, will be updated from video
         
     def initialize_models(self):
@@ -98,14 +91,14 @@ class CompleteSoccerAnalysisPipeline:
         cap.release()
         print(f"Video FPS: {self.video_fps:.2f}")
         
-        # Initialize pass detector with video FPS
-        pass_config = {'fps': self.video_fps}
-        self.pass_detector = SimplePassDetector(pass_config)
+        # Initialize event detector with video FPS
+        event_config = {'fps': self.video_fps}
+        self.event_detector = EventDetector(event_config)
         
-        # Initialize goal positions for shot detection (estimate from video dimensions)
+        # Initialize goal positions and field dimensions for all detectors
         if len(frames) > 0:
             frame_height, frame_width = frames[0].shape[:2]
-            self.pass_detector.initialize_goal_positions(frame_width, frame_height)
+            self.event_detector.initialize_goal_positions(frame_width, frame_height)
         
         # Step 4: Process all frames with detections, tracking, and tactical analysis
         print("\n[Step 4/8] Processing frames with complete analysis...")
@@ -163,8 +156,8 @@ class CompleteSoccerAnalysisPipeline:
                         p_det.class_id = frame_labels
                         label_idx += num_players
                         
-                        # Process pass detection for this frame
-                        self._process_pass_detection(frame_idx, p_det, b_det)
+                        # Process event detection for this frame (passes, shots, free kicks, corners)
+                        self._process_event_detection(frame_idx, p_det, b_det, kp)
                         
                         # Store tracks for interpolation
                         all_tracks = self.tracking_pipeline.convert_detection_to_tracks(p_det, b_det, r_det, all_tracks, frame_idx)
@@ -176,8 +169,8 @@ class CompleteSoccerAnalysisPipeline:
                 # Process frames without players
                 for frame_idx, crops, p_det, b_det, r_det, kp, orig_frame in frame_embeddings_buffer:
                     if len(crops) == 0:  # No players in this frame
-                        # Process pass detection (even with no players, ball might be present)
-                        self._process_pass_detection(frame_idx, p_det, b_det)
+                        # Process event detection (even with no players, ball might be present)
+                        self._process_event_detection(frame_idx, p_det, b_det, kp)
                         
                         all_tracks = self.tracking_pipeline.convert_detection_to_tracks(p_det, b_det, r_det, all_tracks, frame_idx)
                         tactical_frame, _ = self.tactical_pipeline.process_detections_for_tactical_analysis(p_det, r_det, kp)
@@ -203,14 +196,19 @@ class CompleteSoccerAnalysisPipeline:
         output_path = self.processing_pipeline.generate_output_path(video_path, output_suffix)
         self.processing_pipeline.write_video_output(output_frames, output_path, fps=self.video_fps)
         
-        # Step 9: Analyze pass gaps and detect missing passes
-        if self.pass_detector:
-            print("\n[Step 9/10] Analyzing pass gaps...")
-            passes = self.pass_detector.get_confirmed_passes()
+        # Step 9: Finalize all events (passes, shots, free kicks, corners)
+        if self.event_detector:
+            print("\n[Step 9/10] Finalizing all events...")
+            all_events = self.event_detector.finalize_events()
+            passes = all_events.passes
+            shots = all_events.shots
+            free_kicks = all_events.free_kicks
+            corners = all_events.corners
             
-            # Print pass detection metrics
-            if hasattr(self.pass_detector, 'metrics'):
-                metrics = self.pass_detector.metrics
+            # Print event detection metrics
+            stats = self.event_detector.get_stats()
+            if 'passes' in stats:
+                metrics = stats['passes']
                 print(f"\n📊 Pass Detection Metrics:")
                 print(f"   Total possessions detected: {metrics.get('total_possessions', 0)}")
                 print(f"   Passes detected: {metrics.get('passes_detected', 0)}")
@@ -219,33 +217,46 @@ class CompleteSoccerAnalysisPipeline:
                 print(f"   Rejected - same player: {metrics.get('passes_rejected_same_player', 0)}")
                 print(f"   Rejected - trajectory: {metrics.get('passes_rejected_trajectory', 0)}")
                 print(f"   Rejected - duration: {metrics.get('passes_rejected_duration', 0)}")
-                print(f"   Near misses (radius): {metrics.get('near_miss_radius', 0)}")
-                print(f"   Near misses (duration): {metrics.get('near_miss_duration', 0)}")
+            
+            if 'shots' in stats:
+                shot_stats = stats['shots']
+                print(f"\n🎯 Shot Detection Metrics:")
+                print(f"   Shots detected: {shot_stats.get('shots_detected', 0)}")
+                print(f"   Shots on target: {shot_stats.get('shots_on_target', 0)}")
+                print(f"   Shots off target: {shot_stats.get('shots_off_target', 0)}")
+            
+            if 'free_kicks' in stats:
+                fk_stats = stats['free_kicks']
+                print(f"\n⚽ Free Kick Detection Metrics:")
+                print(f"   Free kicks detected: {fk_stats.get('free_kicks_detected', 0)}")
+                print(f"   Candidates created: {fk_stats.get('candidates_created', 0)}")
+            
+            if 'corners' in stats:
+                corner_stats = stats['corners']
+                print(f"\n🏁 Corner Detection Metrics:")
+                print(f"   Corners detected: {corner_stats.get('corners_detected', 0)}")
+                print(f"   Out of bounds detected: {corner_stats.get('out_of_bounds_detected', 0)}")
             
             gaps = self._analyze_pass_gaps(passes, self.video_fps, max_gap_seconds=8)
             if gaps:
-                print(f"⚠️  Found {len(gaps)} suspicious gaps (>8 seconds)")
+                print(f"\n⚠️  Found {len(gaps)} suspicious pass gaps (>8 seconds)")
                 for gap in gaps:
                     end_time_str = f"{gap['end_time']:.1f}s" if gap['end_time'] is not None else "end"
                     print(f"   Gap: {gap['gap_seconds']:.1f}s from {gap['start_time']:.1f}s to {end_time_str}")
             else:
-                print("✓ No suspicious gaps found")
+                print("\n✓ No suspicious pass gaps found")
         
-        # Step 10: Export passes and shots to CSV
-        if self.pass_detector:
-            print("\n[Step 10/10] Exporting passes and shots to CSV...")
-            # Get passes first (this will trigger validation if needed)
-            passes = self.pass_detector.get_confirmed_passes()
-            # Get shots (validation already done, so won't duplicate)
-            shots = self.pass_detector.get_detected_shots()
-            csv_path = self._export_passes_and_shots_to_csv(passes, shots, video_path, output_suffix)
-            print(f"Exported {len(passes)} passes and {len(shots)} shots to: {csv_path}")
+        # Step 10: Export all events to CSV
+        if self.event_detector:
+            print("\n[Step 10/10] Exporting all events to CSV...")
+            csv_path = self._export_all_events_to_csv(passes, shots, free_kicks, corners, video_path, output_suffix)
+            print(f"Exported {len(passes)} passes, {len(shots)} shots, {len(free_kicks)} free kicks, {len(corners)} corners to: {csv_path}")
             
             # Display stats summary
             print("\n" + "=" * 60)
-            print("📊 SHOTS & PASSES STATISTICS")
+            print("📊 ALL EVENTS STATISTICS")
             print("=" * 60)
-            self._display_shots_and_passes_stats(passes, shots)
+            self._display_all_events_stats(passes, shots, free_kicks, corners)
         
         # Summary
         total_time = time.time() - total_start_time
@@ -254,21 +265,23 @@ class CompleteSoccerAnalysisPipeline:
         print(f"Frames processed: {len(frames)}")
         print(f"Average time per frame: {total_time/len(frames):.3f}s")
         print(f"Output saved to: {output_path}")
-        if self.pass_detector:
-            print(f"Passes detected: {len(passes)}")
+        if self.event_detector:
+            print(f"Events detected: {len(passes)} passes, {len(shots)} shots, {len(free_kicks)} free kicks, {len(corners)} corners")
         
         return output_path
     
-    def _process_pass_detection(self, frame_idx: int, player_detections: sv.Detections, ball_detections: sv.Detections):
+    def _process_event_detection(self, frame_idx: int, player_detections: sv.Detections, 
+                                  ball_detections: sv.Detections, keypoints: np.ndarray):
         """
-        Process pass detection for a single frame.
+        Process event detection for a single frame (passes, shots, free kicks, corners).
         
         Args:
             frame_idx: Current frame index
             player_detections: Player detections with tracker IDs and team IDs (class_id)
             ball_detections: Ball detections
+            keypoints: Field keypoints for position analysis
         """
-        if self.pass_detector is None:
+        if self.event_detector is None:
             return
         
         # Extract player positions (bbox centers) and team IDs
@@ -295,10 +308,20 @@ class CompleteSoccerAnalysisPipeline:
             bbox = ball_detections.xyxy[0]
             center_x = (bbox[0] + bbox[2]) / 2.0
             center_y = (bbox[1] + bbox[3]) / 2.0
-            ball_pos = np.array([[center_x, center_y]], dtype=np.float32)
+            ball_pos = np.array([center_x, center_y], dtype=np.float32)
         
-        # Process frame through pass detector
-        self.pass_detector.process_frame(
+        # Set field keypoints if available (for free kicks and corners)
+        if keypoints is not None and keypoints.size > 0:
+            # Extract field corners from keypoints
+            from keypoint_detection.detect_keypoints import extract_field_corners
+            field_corners = extract_field_corners(keypoints)
+            self.event_detector.set_field_keypoints(keypoints, field_corners)
+            
+            # Also set goal positions from keypoints for shot detection
+            self.event_detector.shot_detector.set_goal_positions_from_keypoints(keypoints, field_corners)
+        
+        # Process frame through event detector
+        self.event_detector.process_frame(
             frame=frame_idx,
             player_positions=player_positions,
             player_teams=player_teams,
@@ -385,6 +408,169 @@ class CompleteSoccerAnalysisPipeline:
                     'receiver_team_id': receiver_team_id,
                     'duration_seconds': f"{pass_event.duration_seconds:.3f}",
                     'distance_pixels': f"{pass_event.distance_meters:.2f}"
+                })
+        
+        return csv_path
+    
+    def _export_all_events_to_csv(self, passes, shots, free_kicks, corners, video_path: str, suffix: str = "_complete_analysis"):
+        """
+        Export all events (passes, shots, free kicks, corners) to CSV file.
+        
+        Args:
+            passes: List of PassEvent objects
+            shots: List of ShotEvent objects
+            free_kicks: List of FreeKickEvent objects
+            corners: List of CornerEvent objects
+            video_path: Path to input video (for generating output path)
+            suffix: Suffix for output filename
+            
+        Returns:
+            Path to CSV file
+        """
+        # Generate CSV path
+        csv_path = video_path.replace(".mp4", f"{suffix}_events.csv")
+        
+        # Team color mapping (0=Purple, 1=Red)
+        team_colors = {
+            0: "Purple",
+            1: "Red"
+        }
+        
+        # Write CSV
+        with open(csv_path, 'w', newline='') as csvfile:
+            fieldnames = [
+                'event_type',  # 'pass', 'shot', 'free_kick', 'corner'
+                'event_id',
+                'time_start',
+                'time_end',
+                'time_start_seconds',
+                'time_end_seconds',
+                'player_id',  # Passer/Shooter/Kicker
+                'receiver_player_id',  # Only for passes
+                'team_color',
+                'team_id',
+                'receiver_team_id',  # Only for passes
+                'pass_outcome',  # Only for passes: 'success' or 'interception'
+                'shot_type',  # Only for shots: 'shot_on_target', 'shot_off_target', 'shot_blocked'
+                'free_kick_type',  # Only for free kicks: 'direct' or 'indirect'
+                'corner_side',  # Only for corners: 'top_left', 'top_right', 'bottom_left', 'bottom_right'
+                'duration_seconds',
+                'distance_pixels',
+                'speed_pixels_per_second',
+                'confidence'
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            # Write passes
+            for pass_event in passes:
+                if not pass_event.is_confirmed or pass_event.to_player_id is None:
+                    continue
+                
+                # Determine pass outcome
+                if pass_event.team_id == pass_event.receiver_team_id:
+                    outcome = "success"
+                else:
+                    outcome = "interception"
+                
+                writer.writerow({
+                    'event_type': 'pass',
+                    'event_id': pass_event.event_id,
+                    'time_start': f"{pass_event.start_frame / 30.0:.2f}s",
+                    'time_end': f"{pass_event.end_frame / 30.0:.2f}s" if pass_event.end_frame else "",
+                    'time_start_seconds': pass_event.start_frame / 30.0,
+                    'time_end_seconds': pass_event.end_frame / 30.0 if pass_event.end_frame else 0.0,
+                    'player_id': pass_event.from_player_id,
+                    'receiver_player_id': pass_event.to_player_id,
+                    'team_color': team_colors.get(pass_event.team_id, "Unknown"),
+                    'team_id': pass_event.team_id,
+                    'receiver_team_id': pass_event.receiver_team_id,
+                    'pass_outcome': outcome,
+                    'shot_type': '',
+                    'free_kick_type': '',
+                    'corner_side': '',
+                    'duration_seconds': pass_event.duration_seconds,
+                    'distance_pixels': pass_event.distance_meters,  # Actually pixels
+                    'speed_pixels_per_second': pass_event.implied_speed,
+                    'confidence': pass_event.confidence
+                })
+            
+            # Write shots (avoid duplicates by tracking written IDs)
+            written_shot_ids = set()
+            for shot_event in shots:
+                # Skip duplicates
+                if shot_event.event_id in written_shot_ids:
+                    continue
+                written_shot_ids.add(shot_event.event_id)
+                
+                writer.writerow({
+                    'event_type': 'shot',
+                    'event_id': shot_event.event_id,
+                    'time_start': f"{shot_event.start_time:.2f}s",
+                    'time_end': f"{shot_event.end_time:.2f}s",
+                    'time_start_seconds': shot_event.start_time,
+                    'time_end_seconds': shot_event.end_time,
+                    'player_id': shot_event.shooter_id,
+                    'receiver_player_id': '',  # Shots have no receiver
+                    'team_color': team_colors.get(shot_event.team_id, "Unknown"),
+                    'team_id': shot_event.team_id,
+                    'receiver_team_id': '',
+                    'pass_outcome': '',
+                    'shot_type': shot_event.shot_type.value,
+                    'free_kick_type': '',
+                    'corner_side': '',
+                    'duration_seconds': shot_event.duration_seconds,
+                    'distance_pixels': shot_event.distance_pixels,
+                    'speed_pixels_per_second': shot_event.speed_pixels_per_second,
+                    'confidence': shot_event.confidence
+                })
+            
+            # Write free kicks
+            for fk_event in free_kicks:
+                writer.writerow({
+                    'event_type': 'free_kick',
+                    'event_id': fk_event.event_id,
+                    'time_start': f"{fk_event.start_time:.2f}s",
+                    'time_end': f"{fk_event.end_time:.2f}s",
+                    'time_start_seconds': fk_event.start_time,
+                    'time_end_seconds': fk_event.end_time,
+                    'player_id': fk_event.kicker_id,
+                    'receiver_player_id': '',  # Free kicks have no receiver
+                    'team_color': team_colors.get(fk_event.team_id, "Unknown"),
+                    'team_id': fk_event.team_id,
+                    'receiver_team_id': '',
+                    'pass_outcome': '',
+                    'shot_type': '',
+                    'free_kick_type': fk_event.free_kick_type.value,
+                    'corner_side': '',
+                    'duration_seconds': fk_event.duration_seconds,
+                    'distance_pixels': fk_event.distance_pixels,
+                    'speed_pixels_per_second': fk_event.speed_pixels_per_second,
+                    'confidence': fk_event.confidence
+                })
+            
+            # Write corners
+            for corner_event in corners:
+                writer.writerow({
+                    'event_type': 'corner',
+                    'event_id': corner_event.event_id,
+                    'time_start': f"{corner_event.start_time:.2f}s",
+                    'time_end': f"{corner_event.end_time:.2f}s",
+                    'time_start_seconds': corner_event.start_time,
+                    'time_end_seconds': corner_event.end_time,
+                    'player_id': corner_event.kicker_id,
+                    'receiver_player_id': '',  # Corners have no receiver
+                    'team_color': team_colors.get(corner_event.team_id, "Unknown"),
+                    'team_id': corner_event.team_id,
+                    'receiver_team_id': '',
+                    'pass_outcome': '',
+                    'shot_type': '',
+                    'free_kick_type': '',
+                    'corner_side': corner_event.corner_side.value,
+                    'duration_seconds': corner_event.duration_seconds,
+                    'distance_pixels': corner_event.distance_pixels,
+                    'speed_pixels_per_second': corner_event.speed_pixels_per_second,
+                    'confidence': corner_event.confidence
                 })
         
         return csv_path
@@ -544,6 +730,81 @@ class CompleteSoccerAnalysisPipeline:
         
         return gaps
 
+    def _display_all_events_stats(self, passes: List, shots: List, free_kicks: List, corners: List):
+        """
+        Display formatted statistics for all events by team.
+        
+        Args:
+            passes: List of PassEvent objects
+            shots: List of ShotEvent objects
+            free_kicks: List of FreeKickEvent objects
+            corners: List of CornerEvent objects
+        """
+        from pass_detection.shot_detector import ShotType
+        
+        # Calculate stats by team
+        team_0_passes = [p for p in passes if p.team_id == 0]
+        team_1_passes = [p for p in passes if p.team_id == 1]
+        
+        team_0_shots = [s for s in shots if s.team_id == 0]
+        team_1_shots = [s for s in shots if s.team_id == 1]
+        
+        team_0_free_kicks = [f for f in free_kicks if f.team_id == 0]
+        team_1_free_kicks = [f for f in free_kicks if f.team_id == 1]
+        
+        team_0_corners = [c for c in corners if c.team_id == 0]
+        team_1_corners = [c for c in corners if c.team_id == 1]
+        
+        # Pass stats
+        team_0_successful_passes = len([p for p in team_0_passes if p.receiver_team_id == p.team_id])
+        team_0_interceptions = len([p for p in team_0_passes if p.receiver_team_id != p.team_id])
+        team_1_successful_passes = len([p for p in team_1_passes if p.receiver_team_id == p.team_id])
+        team_1_interceptions = len([p for p in team_1_passes if p.receiver_team_id != p.team_id])
+        
+        # Shot stats
+        team_0_total_shots = len(team_0_shots)
+        team_0_shots_on_target = len([s for s in team_0_shots if s.shot_type == ShotType.SHOT_ON_TARGET])
+        team_0_shots_off_target = len([s for s in team_0_shots if s.shot_type == ShotType.SHOT_OFF_TARGET])
+        team_0_shots_blocked = len([s for s in team_0_shots if s.shot_type == ShotType.SHOT_BLOCKED])
+        
+        team_1_total_shots = len(team_1_shots)
+        team_1_shots_on_target = len([s for s in team_1_shots if s.shot_type == ShotType.SHOT_ON_TARGET])
+        team_1_shots_off_target = len([s for s in team_1_shots if s.shot_type == ShotType.SHOT_OFF_TARGET])
+        team_1_shots_blocked = len([s for s in team_1_shots if s.shot_type == ShotType.SHOT_BLOCKED])
+        
+        # Calculate pass accuracy
+        team_0_pass_accuracy = (team_0_successful_passes / len(team_0_passes) * 100) if len(team_0_passes) > 0 else 0.0
+        team_1_pass_accuracy = (team_1_successful_passes / len(team_1_passes) * 100) if len(team_1_passes) > 0 else 0.0
+        
+        # Display formatted stats
+        print(f"\n{'SHOTS':<20} {'Team 0 (Purple)':<20} {'Team 1 (Red)':<20}")
+        print("-" * 60)
+        print(f"{'Total Shots':<20} {team_0_total_shots:<20} {team_1_total_shots:<20}")
+        print(f"{'Shots On Target':<20} {team_0_shots_on_target:<20} {team_1_shots_on_target:<20}")
+        print(f"{'Shots Off Target':<20} {team_0_shots_off_target:<20} {team_1_shots_off_target:<20}")
+        print(f"{'Shots Blocked':<20} {team_0_shots_blocked:<20} {team_1_shots_blocked:<20}")
+        
+        print(f"\n{'PASSES':<20} {'Team 0 (Purple)':<20} {'Team 1 (Red)':<20}")
+        print("-" * 60)
+        print(f"{'Total Passes':<20} {len(team_0_passes):<20} {len(team_1_passes):<20}")
+        print(f"{'Successful':<20} {team_0_successful_passes:<20} {team_1_successful_passes:<20}")
+        print(f"{'Intercepted':<20} {team_0_interceptions:<20} {team_1_interceptions:<20}")
+        print(f"{'Pass Accuracy':<20} {team_0_pass_accuracy:.1f}%{'':<15} {team_1_pass_accuracy:.1f}%")
+        
+        print(f"\n{'FREE KICKS':<20} {'Team 0 (Purple)':<20} {'Team 1 (Red)':<20}")
+        print("-" * 60)
+        print(f"{'Total Free Kicks':<20} {len(team_0_free_kicks):<20} {len(team_1_free_kicks):<20}")
+        
+        print(f"\n{'CORNERS':<20} {'Team 0 (Purple)':<20} {'Team 1 (Red)':<20}")
+        print("-" * 60)
+        print(f"{'Total Corners':<20} {len(team_0_corners):<20} {len(team_1_corners):<20}")
+        
+        print(f"\n{'SUMMARY':<20} {'Team 0 (Purple)':<20} {'Team 1 (Red)':<20}")
+        print("-" * 60)
+        print(f"{'Total Events':<20} {len(team_0_passes) + team_0_total_shots + len(team_0_free_kicks) + len(team_0_corners):<20} {len(team_1_passes) + team_1_total_shots + len(team_1_free_kicks) + len(team_1_corners):<20}")
+        
+        print("=" * 60)
+    
     def _display_shots_and_passes_stats(self, passes: List, shots: List):
         """
         Display formatted statistics for shots and passes by team.
@@ -608,17 +869,10 @@ if __name__ == "__main__":
     # Run Complete End-to-End Soccer Analysis Pipeline
     print("Starting Soccer Analysis...")
     
-    # TrackNet model path (disabled - using YOLO for ball detection instead)
-    # TrackNet was designed for badminton/tennis, not football, so YOLO works better
-    tracknet_model_path = str(PROJECT_DIR / "Models" / "Pretrained" / "TrackNet" / "tracknet_weights.pth")
-    
-    # Initialize pipeline with YOLO for ball detection (TrackNet disabled)
-    # YOLO model is already trained for football and works better than TrackNet
+    # Initialize pipeline with YOLO for ball detection
     pipeline = CompleteSoccerAnalysisPipeline(
         detection_model_path=model_path,
-        keypoint_model_path=keypoint_model_path,
-        tracknet_model_path=tracknet_model_path,
-        use_tracknet=False  # Use YOLO for ball detection (trained for football)
+        keypoint_model_path=keypoint_model_path
     )
     
     # Use the new high-quality YouTube video (1080p)

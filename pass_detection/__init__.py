@@ -31,6 +31,21 @@ from .player_candidate_generator import PlayerCandidateGenerator, PassCandidate
 from .ball_evidence_validator import BallEvidenceValidator, BallValidationResult
 from .hybrid_pass_manager import HybridPassManager
 
+# Simple pass detector
+from .simple_pass_detector import SimplePassDetector
+
+# Shot detector
+from .shot_detector import ShotDetector, ShotEvent, ShotType
+
+# Free kick detector
+from .free_kick_detector import FreeKickDetector, FreeKickEvent, FreeKickType
+
+# Corner detector
+from .corner_detector import CornerDetector, CornerEvent, CornerSide
+
+# Unified event detector
+from .event_detector import EventDetector, AllEvents
+
 __all__ = [
     # State machine
     'PassStateMachine',
@@ -64,4 +79,26 @@ __all__ = [
     'BallEvidenceValidator',
     'BallValidationResult',
     'HybridPassManager',
+    
+    # Simple pass detector
+    'SimplePassDetector',
+    
+    # Shot detector
+    'ShotDetector',
+    'ShotEvent',
+    'ShotType',
+    
+    # Free kick detector
+    'FreeKickDetector',
+    'FreeKickEvent',
+    'FreeKickType',
+    
+    # Corner detector
+    'CornerDetector',
+    'CornerEvent',
+    'CornerSide',
+    
+    # Unified event detector
+    'EventDetector',
+    'AllEvents',
 ]

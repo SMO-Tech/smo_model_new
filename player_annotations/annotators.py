@@ -321,7 +321,7 @@ class AnnotatorManager:
         # Convert ball tracks to detections
         if ball_tracks is not None and len(ball_tracks) == 4 and ball_tracks[0] is not None:
             # ball_tracks is [x1, y1, x2, y2]
-            # ALWAYS assign tracker_id 0 for ball (since there's only one ball and TrackNet handles temporal consistency)
+            # ALWAYS assign tracker_id 0 for ball (since there's only one ball)
             # Ignore any stored tracker_id from old tracks - force it to 0
             tracker_id_array = np.array([0])
             ball_detections = sv.Detections(

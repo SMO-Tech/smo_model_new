@@ -196,7 +196,7 @@ class TrackingPipeline:
                         'frame': int(frame_idx) if frame_idx is not None else -1,
                         'has_detections': ball_detections is not None and len(ball_detections.xyxy) > 0,
                         'num_detections': len(ball_detections.xyxy) if ball_detections is not None else 0,
-                        'using_yolo': True  # Always using YOLO when use_tracknet=False
+                        'using_yolo': True  # Using YOLO for ball detection
                     },
                     'timestamp': int(time.time() * 1000),
                     'sessionId': 'debug-session',
