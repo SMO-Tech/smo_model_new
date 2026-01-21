@@ -18,7 +18,7 @@ import json
 import os
 
 from .ball_tracker import StrictBallTracker, BallState as OldBallState, BallObservation as OldBallObservation
-from .physics_ball_tracker import PhysicsBallTracker, BallState, BallObservation
+from .physics_ball_tracker import PhysicsBallTracker, BallState, BallObservation, BallObservationSource
 from .shot_detector import ShotDetector, ShotEvent, ShotType
 from .pass_event import PassEvent, PassLifecycleStage
 
@@ -226,9 +226,9 @@ class SimplePassDetector:
         # Debug: Track ball detection rate
         if not hasattr(self, '_ball_detection_stats'):
             self._ball_detection_stats = {'detected': 0, 'predicted': 0, 'lost': 0}
-        if ball_obs.state == BallState.DETECTED:
+        if ball_obs.source == BallObservationSource.DETECTED:
             self._ball_detection_stats['detected'] += 1
-        elif ball_obs.state == BallState.PREDICTED:
+        elif ball_obs.source == BallObservationSource.PREDICTED:
             self._ball_detection_stats['predicted'] += 1
         else:
             self._ball_detection_stats['lost'] += 1
